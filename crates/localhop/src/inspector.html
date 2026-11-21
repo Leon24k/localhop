@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>localhop inspector</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #111622;
+      --panel-2: #161c2c;
+      --border: #232b3e;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #38bdf8;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #a371f7;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; }
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; letter-spacing: -0.02em; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); display: inline-block; }
+    .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-family: var(--mono); font-size: 12px; }
+    .pill {
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 9px; color: var(--muted); display: flex; align-items: center; gap: 6px;
+    }
+    .pill strong, .pill a { color: var(--text); text-decoration: none; }
+    .pill a:hover { color: var(--accent); text-decoration: underline; }
+
+    .main { display: grid; grid-template-columns: 360px 1fr; flex: 1; min-height: 0; }
+    @media (max-width: 860px) { .main { grid-template-columns: 1fr; grid-template-rows: 260px 1fr; } }
+
+    .sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+    .toolbar { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+    input, select, textarea {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 8px; font-family: var(--mono); font-size: 12px;
+    }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+    .toolbar input { flex: 1; min-width: 0; }
+
+    button {
+      background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: #0c4a6e; border-color: #0284c7; color: #e0f2fe; }
+    button.primary:hover { background: #0369a1; color: #fff; }
+
+    .list { overflow-y: auto; flex: 1; }
+    .row {
+      display: grid; grid-template-columns: 44px 52px 1fr auto; gap: 6px; align-items: center;
+      padding: 8px 10px; border-bottom: 1px solid #181f2e; cursor: pointer; font-family: var(--mono); font-size: 12px;
+    }
+    .row:hover { background: var(--panel-2); }
+    .row.active { background: #17253b; border-left: 2px solid var(--accent); padding-left: 8px; }
+    .status { font-weight: 700; text-align: center; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .s2 { background: #102a1a; color: var(--green); }
+    .s3 { background: #102436; color: var(--accent); }
+    .s4 { background: #2d2310; color: var(--yellow); }
+    .s5 { background: #331417; color: var(--red); }
+    .method { color: var(--muted); font-weight: 700; }
+    .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lat { color: var(--muted); font-size: 11px; }
+    .tag-replay { font-size: 10px; color: var(--purple); margin-left: 4px; }
+
+    .detail { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+    .detail-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+      padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    }
+    .detail-title { font-family: var(--mono); font-size: 13px; display: flex; align-items: center; gap: 8px; overflow: hidden; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .detail-body { overflow-y: auto; padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; flex: 1; }
+    @media (max-width: 1050px) { .detail-body { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      display: flex; flex-direction: column; min-width: 0;
+    }
+    .card-h {
+      padding: 8px 12px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 12px;
+      display: flex; justify-content: space-between; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .card-c { padding: 10px 12px; overflow-x: auto; }
+    table.hdrs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; margin-bottom: 10px; }
+    table.hdrs td { padding: 3px 4px; border-bottom: 1px solid #181f2e; vertical-align: top; word-break: break-all; }
+    table.hdrs td:first-child { color: var(--accent); width: 38%; }
+    pre.payload {
+      margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto;
+    }
+    .empty { padding: 48px 24px; text-align: center; color: var(--muted); }
+    .empty code { background: var(--panel-2); padding: 3px 6px; border-radius: 4px; color: var(--text); }
+
+    dialog {
+      background: var(--panel); color: var(--text); border: 1px solid var(--border);
+      border-radius: 10px; width: min(680px, 92vw); padding: 16px;
+    }
+    dialog::backdrop { background: rgba(0,0,0,0.65); }
+    .form-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .form-col { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.04em; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span id="dot" class="dot"></span>
+      <span>localhop</span>
+      <span style="color:var(--muted);font-weight:400;font-size:12px">inspector</span>
+    </div>
+    <div class="pills">
+      <div class="pill">Public: <a id="pubUrl" href="#" target="_blank">—</a></div>
+      <div class="pill">Local: <strong id="localTarget">—</strong></div>
+      <div class="pill">Tunnel RTT: <strong id="rtt">—</strong></div>
+      <div class="pill">Requests: <strong id="reqCount">0</strong></div>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="sidebar">
+      <div class="toolbar">
+        <input id="filter" placeholder="Filter path, method, status…" />
+        <button id="clearBtn" title="Clear log">Clear</button>
+      </div>
+      <div id="list" class="list"></div>
+    </aside>
+
+    <section class="detail">
+      <div id="detailHead" class="detail-head" style="display:none">
+        <div class="detail-title">
+          <span id="dStatus" class="status"></span>
+          <strong id="dMethod"></strong>
+          <span id="dPath" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        </div>
+        <div class="actions">
+          <button id="replayBtn" class="primary">↻ Replay</button>
+          <button id="editReplayBtn">✎ Edit &amp; Replay</button>
+          <button id="curlBtn">Copy cURL</button>
+        </div>
+      </div>
+      <div id="detailContent" class="detail-body">
+        <div class="empty" style="grid-column:1/-1">
+          <h3>Waiting for incoming requests…</h3>
+          <p>Hit your public tunnel URL and every request/webhook will stream here in real time.</p>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<dialog id="editDialog">
+  <h3 style="margin:0 0 12px">Edit &amp; Replay Request</h3>
+  <div class="form-row">
+    <select id="eMethod">
+      <option>GET</option><option>POST</option><option>PUT</option>
+      <option>PATCH</option><option>DELETE</option><option>HEAD</option>
+    </select>
+    <input id="ePath" style="flex:1" placeholder="/api/webhook" />
+  </div>
+  <div class="form-col">
+    <label>Headers (one per line: Name: Value)</label>
+    <textarea id="eHeaders" rows="5"></textarea>
+  </div>
+  <div class="form-col">
+    <label>Body</label>
+    <textarea id="eBody" rows="8"></textarea>
+  </div>
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+    <button id="eCancel">Cancel</button>
+    <button id="eSend" class="primary">Send Replay</button>
+  </div>
+</dialog>
+
+<script>
+const state = { status: null, records: [], selectedId: null, filter: '' };
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const statusClass = (s) => s >= 500 || s === 0 ? 's5' : s >= 400 ? 's4' : s >= 300 ? 's3' : 's2';
+const fmtUs = (us) => us == null ? '—' : (us < 1000 ? `${us}µs` : `${(us / 1000).toFixed(2)}ms`);
+
+function prettyBody(str) {
+  if (!str) return '(empty)';
+  try { return JSON.stringify(JSON.parse(str), null, 2); } catch { return str; }
+}
+
+function renderStatus() {
+  const st = state.status;
+  if (!st) return;
+  $('dot').className = 'dot' + (st.connected ? ' live' : '');
+  const a = $('pubUrl');
+  a.textContent = st.public_url || (st.connected ? 'connected' : 'reconnecting…');
+  a.href = st.public_url || '#';
+  $('localTarget').textContent = st.target;
+  $('rtt').textContent = fmtUs(st.rtt_us);
+  $('reqCount').textContent = st.total_requests;
+}
+
+function renderList() {
+  const q = state.filter.trim().toLowerCase();
+  const filtered = q ? state.records.filter(r =>
+    r.path_and_query.toLowerCase().includes(q) ||
+    r.method.toLowerCase().includes(q) ||
+    String(r.status).includes(q)
+  ) : state.records;
+
+  if (!filtered.length) {
+    $('list').innerHTML = `<div class="empty">No matching requests</div>`;
+    return;
+  }
+
+  $('list').innerHTML = filtered.map(r => `
+    <div class="row ${r.id === state.selectedId ? 'active' : ''}" data-id="${r.id}">
+      <span class="status ${statusClass(r.status)}">${r.status || 'ERR'}</span>
+      <span class="method">${esc(r.method)}</span>
+      <span class="path" title="${esc(r.path_and_query)}">${esc(r.path_and_query)}${r.source === 'replay' ? '<span class="tag-replay">↻</span>' : ''}</span>
+      <span class="lat">${fmtUs(r.local_latency_us)}</span>
+    </div>
+  `).join('');
+
+  $('list').querySelectorAll('.row').forEach(el => {
+    el.onclick = () => { state.selectedId = Number(el.dataset.id); renderList(); renderDetail(); };
+  });
+}
+
+function renderHeadersTable(hdrs) {
+  if (!hdrs || !hdrs.length) return '<div style="color:var(--muted);font-size:12px;margin-bottom:8px">No headers</div>';
+  return `<table class="hdrs">${hdrs.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`;
+}
+
+function selectedRecord() {
+  return state.records.find(r => r.id === state.selectedId) || null;
+}
+
+function renderDetail() {
+  const r = selectedRecord();
+  if (!r) {
+    $('detailHead').style.display = 'none';
+    return;
+  }
+  $('detailHead').style.display = 'flex';
+  $('dStatus').className = 'status ' + statusClass(r.status);
+  $('dStatus').textContent = r.status || 'ERR';
+  $('dMethod').textContent = r.method;
+  $('dPath').textContent = r.path_and_query;
+
+  $('detailContent').innerHTML = `
+    <div class="card">
+      <div class="card-h"><span>Request (${r.source})</span><span>${r.request_bytes} B</span></div>
+      <div class="card-c">
+        ${renderHeadersTable(r.request_headers)}
+        <pre class="payload">${esc(prettyBody(r.request_body))}</pre>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span>Response</span><span>local ${fmtUs(r.local_latency_us)} &middot; ${r.response_bytes} B</span></div>
+      <div class="card-c">
+        ${renderHeadersTable(r.response_headers)}
+        <pre class="payload">${esc(prettyBody(r.response_body))}</pre>
+      </div>
+    </div>
+  `;
+}
+
+async function sendReplay(payload) {
+  const res = await fetch('/api/replay', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    const rec = await res.json();
+    state.selectedId = rec.id;
+    renderList();
+    renderDetail();
+  }
+}
+
+$('filter').oninput = (e) => { state.filter = e.target.value; renderList(); };
+$('clearBtn').onclick = async () => { await fetch('/api/clear', { method: 'POST' }); };
+
+$('replayBtn').onclick = () => {
+  const r = selectedRecord();
+  if (!r) return;
+  sendReplay({ method: r.method, path_and_query: r.path_and_query, headers: r.request_headers, body: r.request_body });
+};
+
+$('editReplayBtn').onclick = () => {
+  const r = selectedRecord();
+  if (!r) return;
+  $('eMethod').value = r.method;
+  $('ePath').value = r.path_and_query;
+  $('eHeaders').value = r.request_headers.map(([k, v]) => `${k}: ${v}`).join('\n');
+  $('eBody').value = r.request_body;
+  $('editDialog').showModal();
+};
+
+$('eCancel').onclick = () => $('editDialog').close();
+$('eSend').onclick = async () => {
+  const headers = $('eHeaders').value.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+    const idx = line.indexOf(':');
+    return idx === -1 ? [line, ''] : [line.slice(0, idx).trim(), line.slice(idx + 1).trim()];
+  });
+  await sendReplay({
+    method: $('eMethod').value,
+    path_and_query: $('ePath').value,
+    headers,
+    body: $('eBody').value,
+  });
+  $('editDialog').close();
+};
+
+$('curlBtn').onclick = async () => {
+  const r = selectedRecord();
+  if (!r) return;
+  const base = (state.status && state.status.public_url) || (state.status && state.status.target) || 'http://127.0.0.1:3000';
+  const hdrFlags = r.request_headers
+    .filter(([k]) => !['host', 'content-length'].includes(k.toLowerCase()))
+    .map(([k, v]) => `-H '${k}: ${v.replace(/'/g, "'\\''")}'`)
+    .join(' ');
+  const bodyFlag = r.request_body ? ` --data '${r.request_body.replace(/'/g, "'\\''")}'` : '';
+  const cmd = `curl -X ${r.method} '${base}${r.path_and_query}' ${hdrFlags}${bodyFlag}`.trim();
+  await navigator.clipboard.writeText(cmd);
+  const btn = $('curlBtn');
+  btn.textContent = 'Copied!';
+  setTimeout(() => { btn.textContent = 'Copy cURL'; }, 1200);
+};
+
+async function boot() {
+  const res = await fetch('/api/state');
+  const snap = await res.json();
+  state.status = snap.status;
+  state.records = snap.records;
+  if (state.records.length) state.selectedId = state.records[0].id;
+  renderStatus();
+  renderList();
+  renderDetail();
+
+  const es = new EventSource('/api/events');
+  es.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'record') {
+      if (!state.records.some(r => r.id === msg.record.id)) {
+        state.records.unshift(msg.record);
+        if (state.records.length > 200) state.records.pop();
+      }
+      if (!state.selectedId) state.selectedId = msg.record.id;
+      if (state.status) state.status.total_requests = (state.status.total_requests || 0) + 1;
+      renderStatus();
+      renderList();
+      renderDetail();
+    } else if (msg.type === 'status') {
+      state.status = msg.status;
+      renderStatus();
+    } else if (msg.type === 'cleared') {
+      state.records = [];
+      state.selectedId = null;
+      renderList();
+      renderDetail();
+    }
+  };
+}
+
+boot();
+</script>
+</body>
+</html>

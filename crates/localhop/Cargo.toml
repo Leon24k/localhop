@@ -1,0 +1,29 @@
+[package]
+name = "localhop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Seamless low-latency Rust localhost tunnel CLI with live HTTP/webhook inspector & replay"
+
+[[bin]]
+name = "localhop"
+path = "src/main.rs"
+
+[dependencies]
+localhop-protocol.workspace = true
+axum.workspace = true
+bytes.workspace = true
+clap.workspace = true
+dashmap.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
