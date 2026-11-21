@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="260" viewBox="0 0 820 260" fill="none">
+  <defs>
+    <linearGradient id="pipe" x1="230" y1="95" x2="540" y2="95" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="50%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38BDF8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34D399"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#A855F7"/>
+    </marker>
+  </defs>
+
+  <rect width="820" height="260" rx="14" fill="#0B1120" stroke="#1E293B" stroke-width="1.5"/>
+
+  <!-- Box 1: Internet Client -->
+  <rect x="24" y="54" width="138" height="82" rx="10" fill="#111827" stroke="#334155" stroke-width="1.5"/>
+  <text x="93" y="84" text-anchor="middle" fill="#F8FAFC" font-family="-apple-system, Inter, sans-serif" font-size="13.5" font-weight="700">Public Client</text>
+  <text x="93" y="103" text-anchor="middle" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace" font-size="11">Browser / Webhook</text>
+  <text x="93" y="120" text-anchor="middle" fill="#38BDF8" font-family="ui-monospace, Menlo, monospace" font-size="10.5">HTTPS Request</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="162" y1="95" x2="210" y2="95" stroke="#38BDF8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Box 2: localhop-server -->
+  <rect x="216" y="42" width="176" height="106" rx="10" fill="#0F172A" stroke="#38BDF8" stroke-width="1.8"/>
+  <text x="304" y="70" text-anchor="middle" fill="#38BDF8" font-family="ui-monospace, Menlo, monospace" font-size="13" font-weight="700">localhop-server</text>
+  <text x="304" y="90" text-anchor="middle" fill="#CBD5E1" font-family="-apple-system, Inter, sans-serif" font-size="11.5">Axum Streaming Relay</text>
+  <text x="304" y="110" text-anchor="middle" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace" font-size="10.5">DashMap · Zero-GC</text>
+  <text x="304" y="129" text-anchor="middle" fill="#64748B" font-family="ui-monospace, Menlo, monospace" font-size="10">/t/&lt;id&gt; or *.domain</text>
+
+  <!-- Multiplexed tunnel pipe -->
+  <line x1="394" y1="95" x2="508" y2="95" stroke="url(#pipe)" stroke-width="4" stroke-dasharray="7 4" marker-end="url(#arrowGreen)" marker-start="url(#arrowBlue)"/>
+  <rect x="404" y="54" width="96" height="28" rx="6" fill="#1E1B4B" stroke="#6366F1" stroke-width="1"/>
+  <text x="452" y="66" text-anchor="middle" fill="#C7D2FE" font-family="ui-monospace, Menlo, monospace" font-size="9.5" font-weight="700">BINARY WS MUX</text>
+  <text x="452" y="77" text-anchor="middle" fill="#818CF8" font-family="ui-monospace, Menlo, monospace" font-size="9">9B hdr + raw Bytes</text>
+
+  <!-- Box 3: localhop CLI -->
+  <rect x="514" y="42" width="154" height="106" rx="10" fill="#0F172A" stroke="#34D399" stroke-width="1.8"/>
+  <text x="591" y="70" text-anchor="middle" fill="#34D399" font-family="ui-monospace, Menlo, monospace" font-size="13" font-weight="700">localhop CLI</text>
+  <text x="591" y="90" text-anchor="middle" fill="#CBD5E1" font-family="-apple-system, Inter, sans-serif" font-size="11.5">Hyper Keep-Alive Pool</text>
+  <text x="591" y="110" text-anchor="middle" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace" font-size="10.5">Auto-Reconnect</text>
+  <text x="591" y="129" text-anchor="middle" fill="#64748B" font-family="ui-monospace, Menlo, monospace" font-size="10">Ping/Pong RTT</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="668" y1="95" x2="704" y2="95" stroke="#34D399" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Box 4: Local Dev Server -->
+  <rect x="710" y="54" width="88" height="82" rx="10" fill="#111827" stroke="#334155" stroke-width="1.5"/>
+  <text x="754" y="84" text-anchor="middle" fill="#F8FAFC" font-family="-apple-system, Inter, sans-serif" font-size="12.5" font-weight="700">Local App</text>
+  <text x="754" y="103" text-anchor="middle" fill="#34D399" font-family="ui-monospace, Menlo, monospace" font-size="11">:3000</text>
+  <text x="754" y="120" text-anchor="middle" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace" font-size="10">localhost</text>
+
+  <!-- Arrow 3 -> 5 (Inspector) -->
+  <line x1="591" y1="148" x2="591" y2="178" stroke="#A855F7" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- Box 5: Live Inspector UI -->
+  <rect x="466" y="184" width="250" height="54" rx="10" fill="#1A1033" stroke="#A855F7" stroke-width="1.5"/>
+  <text x="591" y="206" text-anchor="middle" fill="#E9D5FF" font-family="ui-monospace, Menlo, monospace" font-size="12" font-weight="700">Live Inspector UI (:4040)</text>
+  <text x="591" y="224" text-anchor="middle" fill="#C084FC" font-family="-apple-system, Inter, sans-serif" font-size="11">SSE Stream · Ring Buffer · 1-Click Edit &amp; Replay</text>
+
+  <!-- Replay loop arrow -->
+  <path d="M 716 211 L 754 211 L 754 142" stroke="#A855F7" stroke-width="1.6" stroke-dasharray="4 3" fill="none" marker-end="url(#arrowPurple)"/>
+  <text x="762" y="178" fill="#C084FC" font-family="ui-monospace, Menlo, monospace" font-size="9.5">Replay</text>
+
+  <!-- Footer caption -->
+  <text x="24" y="232" fill="#64748B" font-family="ui-monospace, Menlo, monospace" font-size="10.5">Single-port HTTP/WS relay · Deploys free on Render/Docker · No GC stalls</text>
+</svg>

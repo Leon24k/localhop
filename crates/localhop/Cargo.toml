@@ -3,6 +3,7 @@ name = "localhop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Seamless low-latency Rust localhost tunnel CLI with live HTTP/webhook inspector & replay"
 
 [[bin]]
