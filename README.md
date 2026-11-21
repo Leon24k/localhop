@@ -20,6 +20,7 @@
 
   <p>
     <a href="#why-localhop">Features</a> &middot;
+    <a href="#installation">Install</a> &middot;
     <a href="#benchmarks">Benchmarks</a> &middot;
     <a href="#localhop-vs-ngrok-vs-cloudflare-tunnel">Comparison</a> &middot;
     <a href="#quick-start">Quick Start</a> &middot;
@@ -104,6 +105,33 @@ Measured with release binaries (`lto = "thin"`, `strip = true`, `opt-level = 3`)
 | **Self-Hostable (Open Source)** | **Yes (MIT, $0 on Render/Docker)** | Proprietary SaaS | Edge requires Cloudflare |
 | **Global Anycast Edge (200+ PoPs)** | Bring your own region / VPS | Managed multi-region | **200+ global PoPs** |
 | **Best Choice When…** | You want **ultra-low footprint, no caps/warnings, self-hosted control + ngrok-style webhook replay** | You want instant SaaS convenience with zero deployment | You want permanent production exposure behind Cloudflare's global edge |
+
+---
+
+## Installation
+
+### Cargo *(Rust)*
+```bash
+# From crates.io (once published)
+cargo install localhop
+
+# Or directly from GitHub
+cargo install --git https://github.com/Leon24k/localhop localhop
+```
+
+### npm / npx *(No Rust required)*
+```bash
+# Run instantly without installing
+npx localhop 3000 --server https://<your-relay>.onrender.com
+
+# Or install globally
+npm install -g localhop
+```
+
+### Shell Installer *(macOS & Linux prebuilt binary)*
+```bash
+curl -fsSL https://raw.githubusercontent.com/Leon24k/localhop/main/scripts/install.sh | sh
+```
 
 ---
 
@@ -214,6 +242,9 @@ Tunnels will automatically be issued clean subdomain URLs like `https://myapp.ho
 
 ```text
 localhop/
+├── .github/workflows/
+│   ├── ci.yml                 # Automated workspace build & test CI
+│   └── release.yml            # Cross-platform GitHub Release binaries (macOS/Linux/Windows)
 ├── assets/
 │   ├── logo-dark.svg          # Adaptive README logo (dark theme)
 │   ├── logo-light.svg         # Adaptive README logo (light theme)
@@ -223,11 +254,31 @@ localhop/
 │   ├── localhop-server/       # Lock-free Axum streaming relay server
 │   └── localhop/              # CLI, Hyper keep-alive forwarder, embedded inspector UI
 │       └── examples/bench.rs  # Reproducible loopback load & latency benchmark
+├── npm/localhop/              # Zero-dependency npm/npx binary wrapper
 ├── scripts/
-│   └── bench.sh               # End-to-end release benchmark runner
+│   ├── bench.sh               # End-to-end release benchmark runner
+│   └── install.sh             # macOS/Linux prebuilt binary installer
 ├── Dockerfile                 # Multi-stage slim production relay image
 └── render.yaml                # Render free-tier Blueprint config
 ```
+
+## Publishing a Release
+
+1. **Tag & push** to trigger `.github/workflows/release.yml` (builds macOS arm64/x64, Linux x64/arm64, and Windows x64 archives + `SHA256SUMS.txt`):
+   ```bash
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+2. **Publish to crates.io** (in dependency order):
+   ```bash
+   cargo login
+   cargo publish -p localhop-protocol
+   cargo publish -p localhop
+   cargo publish -p localhop-server
+   ```
+3. **Publish to npm** (after the GitHub Release `v0.1.0` assets finish uploading):
+   ```bash
+   cd npm/localhop && npm login && npm publish
+   ```
 
 ## Roadmap
 

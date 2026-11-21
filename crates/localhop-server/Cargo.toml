@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["tunnel", "ngrok", "proxy", "axum", "relay"]
+categories = ["network-programming", "web-programming::http-server"]
 description = "Public low-latency Axum relay server for localhop"
 
 [[bin]]

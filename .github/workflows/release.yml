@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins --target ${{ matrix.target }}
+
+      - name: Package archives (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for bin in localhop localhop-server; do
+            tar -C "target/${{ matrix.target }}/release" -czf "dist/${bin}-${TAG}-${{ matrix.target }}.tar.gz" "${bin}"
+          done
+
+      - name: Package archives (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $TAG = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          foreach ($bin in @("localhop", "localhop-server")) {
+            Compress-Archive -Path "target/${{ matrix.target }}/release/${bin}.exe" -DestinationPath "dist/${bin}-${TAG}-${{ matrix.target }}.zip"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

@@ -3,3 +3,5 @@
 .DS_Store
 *.log
 .env
+npm/localhop/vendor
+npm/localhop/node_modules
