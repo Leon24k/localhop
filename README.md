@@ -19,6 +19,7 @@
   </p>
 
   <p>
+    <a href="https://leon24k.github.io/localhop/">Website</a> &middot;
     <a href="#why-localhop">Features</a> &middot;
     <a href="#installation">Install</a> &middot;
     <a href="#benchmarks">Benchmarks</a> &middot;
