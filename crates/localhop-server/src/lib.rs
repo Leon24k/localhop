@@ -35,6 +35,7 @@ use tracing::{debug, info, warn};
 const OUTBOUND_CHANNEL_CAPACITY: usize = 512;
 const BODY_CHANNEL_CAPACITY: usize = 64;
 const WS_CHANNEL_CAPACITY: usize = 128;
+const RELAY_LANDING_HTML: &str = include_str!("landing.html");
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -510,33 +511,13 @@ async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request<Body>
     }
 
     if req.uri().path() == "/" {
-        let active = state.tunnels.len();
-        let total = state.total_requests.load(Ordering::Relaxed);
-        return Html(format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>localhop relay</title>
-  <style>
-    body {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0b0d12; color: #e6edf3; max-width: 680px; margin: 72px auto; padding: 0 24px; line-height: 1.6; }}
-    .badge {{ display: inline-block; padding: 2px 10px; border-radius: 999px; background: #122b1e; color: #3fb950; font-size: 13px; }}
-    pre {{ background: #141821; border: 1px solid #262c3a; padding: 14px 16px; border-radius: 8px; overflow-x: auto; }}
-    .muted {{ color: #8b949e; }}
-  </style>
-</head>
-<body>
-  <span class="badge">● localhop relay online</span>
-  <h1>localhop</h1>
-  <p class="muted">Zero-GC, low-latency Rust localhost tunnel with built-in HTTP &amp; webhook inspector.</p>
-  <p>Active tunnels: <strong>{active}</strong> &middot; Proxied requests: <strong>{total}</strong></p>
-  <pre>localhop 3000 --server &lt;this-server-url&gt;</pre>
-  <p class="muted">Health JSON: <a href="/_localhop/health" style="color:#58a6ff">/_localhop/health</a></p>
-</body>
-</html>"#
-        ))
-        .into_response();
+        let active = state.tunnels.len().to_string();
+        let total = state.total_requests.load(Ordering::Relaxed).to_string();
+        let html = RELAY_LANDING_HTML
+            .replace("__ACTIVE_TUNNELS__", &active)
+            .replace("__TOTAL_REQUESTS__", &total)
+            .replace("__VERSION__", env!("CARGO_PKG_VERSION"));
+        return Html(html).into_response();
     }
 
     (StatusCode::NOT_FOUND, "localhop: tunnel or route not found").into_response()

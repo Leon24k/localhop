@@ -1,0 +1,1192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>localhop | Zero-GC Rust Localhost Tunnel &amp; Live HTTP Inspector</title>
+  <meta name="description" content="Expose localhost in milliseconds with a 3.5 MB Rust binary. Multiplexed zero-copy tunneling, WebSocket passthrough, and a built-in live HTTP and webhook replay inspector." />
+  <meta property="og:title" content="localhop | Zero-GC Rust Localhost Tunnel &amp; Live HTTP Inspector" />
+  <meta property="og:description" content="Sub-millisecond Rust localhost tunnel with built-in live HTTP and webhook inspector, WebSocket passthrough, and free self-hosting." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1120'/%3E%3Ccircle cx='18' cy='44' r='6' fill='%2334d399'/%3E%3Ccircle cx='46' cy='24' r='6' fill='%2338bdf8'/%3E%3Cpath d='M21 38 C24 18, 38 14, 43 21' stroke='%2338bdf8' stroke-width='4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #070a10;
+      --bg-elev: #0d121d;
+      --bg-card: #101726;
+      --bg-code: #090d16;
+      --border: rgba(148, 163, 184, 0.14);
+      --border-strong: rgba(56, 189, 248, 0.35);
+      --text: #f1f5f9;
+      --text-soft: #94a3b8;
+      --text-muted: #64748b;
+      --cyan: #38bdf8;
+      --emerald: #34d399;
+      --indigo: #818cf8;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --radius: 14px;
+      --container: 1120px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    /* Background radial grid glow */
+    .bg-glow {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background:
+        radial-gradient(60% 42% at 50% -5%, rgba(56, 189, 248, 0.15), transparent 70%),
+        radial-gradient(38% 30% at 85% 18%, rgba(52, 211, 153, 0.09), transparent 70%),
+        radial-gradient(40% 35% at 15% 45%, rgba(129, 140, 248, 0.07), transparent 70%);
+    }
+
+    .container {
+      width: 100%;
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Navigation */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      background: rgba(7, 10, 16, 0.78);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+      gap: 20px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }
+    .brand span.accent {
+      background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 26px;
+      font-size: 14px;
+      color: var(--text-soft);
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      font-size: 13.5px;
+      font-weight: 600;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .nav-cta:hover {
+      border-color: var(--border-strong);
+      background: rgba(56, 189, 248, 0.1);
+    }
+    @media (max-width: 760px) {
+      .nav-links { display: none; }
+    }
+
+    /* Hero */
+    .hero {
+      padding: 76px 0 48px;
+      text-align: center;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(52, 211, 153, 0.28);
+      background: rgba(16, 185, 129, 0.08);
+      color: #a7f3d0;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 24px;
+    }
+    .eyebrow .pulse {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 10px var(--emerald);
+    }
+    h1 {
+      margin: 0 auto 20px;
+      max-width: 820px;
+      font-size: clamp(38px, 6vw, 64px);
+      font-weight: 800;
+      line-height: 1.06;
+      letter-spacing: -0.04em;
+    }
+    h1 .grad {
+      background: linear-gradient(120deg, var(--cyan) 0%, #a5b4fc 55%, var(--emerald) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero-sub {
+      margin: 0 auto 32px;
+      max-width: 650px;
+      font-size: clamp(16px, 2vw, 19px);
+      color: var(--text-soft);
+      line-height: 1.6;
+    }
+
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 34px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 22px;
+      border-radius: 10px;
+      font-size: 14.5px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: transform 0.12s, background 0.15s, border-color 0.15s;
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #4f46e5);
+      color: #ffffff;
+      box-shadow: 0 10px 30px -10px rgba(56, 189, 248, 0.55);
+    }
+    .btn-primary:hover { filter: brightness(1.1); }
+    .btn-secondary {
+      background: var(--bg-card);
+      border-color: var(--border);
+      color: var(--text);
+    }
+    .btn-secondary:hover { border-color: var(--border-strong); }
+
+    /* Install command widget */
+    .install-box {
+      max-width: 640px;
+      margin: 0 auto 52px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      text-align: left;
+      box-shadow: 0 24px 60px -28px rgba(0, 0, 0, 0.8);
+    }
+    .install-tabs {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding: 0 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .tab-group { display: flex; gap: 4px; }
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .tab-btn.active {
+      color: var(--cyan);
+      border-bottom-color: var(--cyan);
+    }
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-soft);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .install-cmd {
+      padding: 16px 18px;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      color: #e2e8f0;
+      overflow-x: auto;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .install-cmd .prompt { color: var(--emerald); user-select: none; }
+
+    /* Interactive Terminal + Inspector Showcase */
+    .showcase {
+      display: grid;
+      grid-template-columns: 1fr 1.15fr;
+      gap: 18px;
+      text-align: left;
+      margin-bottom: 56px;
+    }
+    @media (max-width: 920px) {
+      .showcase { grid-template-columns: 1fr; }
+    }
+    .window {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 28px 70px -30px rgba(0, 0, 0, 0.85);
+    }
+    .win-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.025);
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .dots { display: flex; gap: 6px; }
+    .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; background: #334155; }
+    .dots i:nth-child(1) { background: #ef4444; opacity: 0.75; }
+    .dots i:nth-child(2) { background: #f59e0b; opacity: 0.75; }
+    .dots i:nth-child(3) { background: #10b981; opacity: 0.75; }
+
+    .term-body {
+      padding: 16px 18px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.72;
+      color: #cbd5e1;
+      overflow-x: auto;
+    }
+    .term-line { white-space: nowrap; }
+    .c-cyan { color: var(--cyan); }
+    .c-green { color: var(--emerald); }
+    .c-purple { color: #c084fc; }
+    .c-muted { color: var(--text-muted); }
+    .c-amber { color: var(--amber); }
+
+    /* Interactive Demo Inspector */
+    .insp-grid {
+      display: grid;
+      grid-template-columns: 205px 1fr;
+      flex: 1;
+      min-height: 292px;
+    }
+    @media (max-width: 560px) {
+      .insp-grid { grid-template-columns: 1fr; }
+    }
+    .insp-list {
+      border-right: 1px solid var(--border);
+      background: rgba(7, 10, 16, 0.45);
+    }
+    .insp-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .insp-row:hover { background: rgba(56, 189, 248, 0.07); }
+    .insp-row.active {
+      background: rgba(56, 189, 248, 0.13);
+      border-left: 2px solid var(--cyan);
+      padding-left: 10px;
+    }
+    .pill-status {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .st-2xx { background: rgba(16, 185, 129, 0.15); color: var(--emerald); }
+    .st-1xx { background: rgba(168, 85, 247, 0.18); color: #d8b4fe; }
+    .insp-path {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .insp-detail {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .insp-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .insp-meta {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--text-soft);
+    }
+    .replay-mini {
+      background: rgba(56, 189, 248, 0.14);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #bae6fd;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .replay-mini:hover { background: rgba(56, 189, 248, 0.24); color: #fff; }
+    .insp-code {
+      margin: 0;
+      padding: 12px;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: #cbd5e1;
+      overflow-x: auto;
+      flex: 1;
+    }
+
+    /* Metrics strip */
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 84px;
+    }
+    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 460px) { .metrics { grid-template-columns: 1fr; } }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 22px;
+    }
+    .metric-val {
+      font-family: var(--mono);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .metric-val.cyan { color: var(--cyan); }
+    .metric-val.emerald { color: var(--emerald); }
+    .metric-label { font-size: 13px; color: var(--text-soft); }
+
+    /* Sections */
+    section { padding: 64px 0; }
+    .sec-head {
+      max-width: 680px;
+      margin-bottom: 36px;
+    }
+    .sec-kicker {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--cyan);
+      margin-bottom: 10px;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: clamp(26px, 4vw, 38px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+    }
+    .sec-desc {
+      margin: 0;
+      color: var(--text-soft);
+      font-size: 16px;
+    }
+
+    /* Feature Grid */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .features { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 600px) { .features { grid-template-columns: 1fr; } }
+    .feat {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: border-color 0.15s;
+    }
+    .feat:hover { border-color: var(--border-strong); }
+    .feat-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      color: var(--cyan);
+      margin-bottom: 16px;
+    }
+    .feat h3 {
+      margin: 0 0 8px;
+      font-size: 16.5px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .feat p {
+      margin: 0;
+      font-size: 14px;
+      color: var(--text-soft);
+      line-height: 1.6;
+    }
+
+    /* Benchmarks visual bars */
+    .bench-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+    }
+    @media (max-width: 880px) { .bench-grid { grid-template-columns: 1fr; } }
+    .bench-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+    .bench-card h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+    }
+    .bench-sub {
+      margin: 0 0 20px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .bar-group { margin-bottom: 16px; }
+    .bar-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      margin-bottom: 6px;
+      color: var(--text-soft);
+    }
+    .bar-track {
+      height: 10px;
+      background: rgba(148, 163, 184, 0.1);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+    }
+    .fill-cyan { background: linear-gradient(90deg, var(--emerald), var(--cyan)); }
+    .fill-slate { background: #475569; }
+    .fill-indigo { background: linear-gradient(90deg, #6366f1, #a855f7); }
+    .bench-note {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      font-size: 12.5px;
+      color: var(--text-muted);
+    }
+    .bench-note code {
+      font-family: var(--mono);
+      color: var(--cyan);
+      background: rgba(56, 189, 248, 0.08);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* Comparison Table */
+    .table-wrap {
+      overflow-x: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    table.cmp {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+      font-size: 14px;
+    }
+    table.cmp th, table.cmp td {
+      padding: 14px 18px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    table.cmp tr:last-child td { border-bottom: none; }
+    table.cmp thead th {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    table.cmp th.hl, table.cmp td.hl {
+      background: rgba(56, 189, 248, 0.055);
+      color: var(--text);
+    }
+    table.cmp thead th.hl { color: var(--cyan); }
+    .yes { color: var(--emerald); font-weight: 700; }
+    .warn { color: var(--amber); }
+    .muted { color: var(--text-muted); }
+
+    /* Steps */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 820px) { .steps { grid-template-columns: 1fr; } }
+    .step {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-weight: 800;
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .step h3 { margin: 0; font-size: 16px; }
+    .step p { margin: 0; font-size: 13.5px; color: var(--text-soft); }
+    .step pre {
+      margin: 0;
+      padding: 12px;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #e2e8f0;
+      overflow-x: auto;
+    }
+
+    /* CTA Banner */
+    .cta-panel {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(99, 102, 241, 0.12));
+      border: 1px solid var(--border-strong);
+      border-radius: 18px;
+      padding: 44px 32px;
+      text-align: center;
+      margin: 28px 0 40px;
+    }
+    .cta-panel h2 { margin-bottom: 12px; }
+    .cta-panel p {
+      margin: 0 auto 24px;
+      max-width: 560px;
+      color: var(--text-soft);
+      font-size: 15.5px;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 36px 0 48px;
+      color: var(--text-muted);
+      font-size: 13.5px;
+    }
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .footer-links {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .footer-links a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <nav>
+    <div class="container nav-inner">
+      <a href="#" class="brand">
+        <svg width="30" height="30" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+          <rect width="64" height="64" rx="15" fill="#0f172a" stroke="#38bdf8" stroke-width="2.5"/>
+          <circle cx="19" cy="43" r="6" fill="#34d399"/>
+          <circle cx="45" cy="23" r="6" fill="#38bdf8"/>
+          <path d="M22 37 C25 18, 37 14, 42 20" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+        <span>local<span class="accent">hop</span></span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#compare">Compare</a>
+        <a href="#quickstart">Quick Start</a>
+      </div>
+      <a class="nav-cta" href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.16 1.18a10.95 10.95 0 0 1 5.76 0c2.19-1.49 3.16-1.18 3.16-1.18.62 1.58.23 2.75.11 3.04.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.13 0 1.54-.01 2.78-.01 3.16 0 .31.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/>
+        </svg>
+        GitHub
+      </a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <div class="eyebrow">
+          <span class="pulse"></span>
+          <span>v0.1.0 &middot; Open Source MIT &middot; Pure Rust 2024</span>
+        </div>
+
+        <h1>
+          Expose localhost in <span class="grad">milliseconds</span>.<br />
+          Inspect and replay every request.
+        </h1>
+
+        <p class="hero-sub">
+          A 3.5 MB zero-GC Rust localhost tunnel with multiplexed binary streaming, full WebSocket passthrough, a built-in live inspector UI, and free single-port self-hosting.
+        </p>
+
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#quickstart">Get Started Free</a>
+          <a class="btn btn-secondary" href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">View Source on GitHub</a>
+        </div>
+
+        <div class="install-box">
+          <div class="install-tabs">
+            <div class="tab-group" role="tablist">
+              <button class="tab-btn active" data-tab="cargo">Cargo</button>
+              <button class="tab-btn" data-tab="npx">npx</button>
+              <button class="tab-btn" data-tab="shell">Shell</button>
+              <button class="tab-btn" data-tab="docker">Docker Relay</button>
+            </div>
+            <button class="copy-btn" id="copyInstall">Copy</button>
+          </div>
+          <div class="install-cmd">
+            <span class="prompt">$</span>
+            <span id="installText">cargo install localhop</span>
+          </div>
+        </div>
+
+        <div class="showcase">
+          <div class="window">
+            <div class="win-bar">
+              <div class="dots"><i></i><i></i><i></i></div>
+              <span>terminal &middot; localhop 3000</span>
+            </div>
+            <div class="term-body">
+              <div class="term-line"><span class="c-green">$</span> localhop 3000 -s myapp --server https://relay.example.com</div>
+              <br />
+              <div class="term-line"><strong class="c-cyan">localhop</strong> v0.1.0</div>
+              <div class="term-line c-muted">---------------------------------------------------</div>
+              <div class="term-line">Forwarding &nbsp; -&gt; &nbsp;http://127.0.0.1:3000</div>
+              <div class="term-line">Inspector &nbsp;&nbsp; -&gt; &nbsp;<span class="c-cyan">http://127.0.0.1:4040</span></div>
+              <div class="term-line">Relay &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -&gt; &nbsp;wss://relay.example.com/_localhop/ws</div>
+              <br />
+              <div class="term-line"><strong class="c-green">&#9679; LIVE</strong> &nbsp;Public URL &nbsp;-&gt; &nbsp;<strong class="c-green">https://myapp.relay.example.com</strong></div>
+              <div class="term-line c-muted">---------------------------------------------------</div>
+              <div class="term-line"><span class="c-green">201</span> &nbsp;POST &nbsp;/webhooks/stripe &nbsp;&nbsp; <span class="c-muted">local 0.74ms &middot; total 1.26ms</span></div>
+              <div class="term-line"><span class="c-green">200</span> &nbsp;GET &nbsp;&nbsp;/api/users?limit=10 <span class="c-muted">local 0.38ms &middot; total 0.89ms</span></div>
+              <div class="term-line"><span class="c-purple">101</span> &nbsp;WS &nbsp;&nbsp;&nbsp;/vite-hmr &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="c-muted">local 0.51ms &middot; total 0.96ms</span></div>
+            </div>
+          </div>
+
+          <div class="window">
+            <div class="win-bar">
+              <div class="dots"><i></i><i></i><i></i></div>
+              <span>live inspector &middot; 127.0.0.1:4040</span>
+            </div>
+            <div class="insp-grid">
+              <div class="insp-list" id="demoList">
+                <div class="insp-row active" data-idx="0">
+                  <span class="pill-status st-2xx">201</span>
+                  <span class="c-muted">POST</span>
+                  <span class="insp-path">/webhooks/stripe</span>
+                </div>
+                <div class="insp-row" data-idx="1">
+                  <span class="pill-status st-2xx">200</span>
+                  <span class="c-muted">GET</span>
+                  <span class="insp-path">/api/users?limit=10</span>
+                </div>
+                <div class="insp-row" data-idx="2">
+                  <span class="pill-status st-1xx">101</span>
+                  <span class="c-purple">WS</span>
+                  <span class="insp-path">/vite-hmr</span>
+                </div>
+              </div>
+              <div class="insp-detail">
+                <div class="insp-top">
+                  <div class="insp-meta" id="demoMeta">POST /webhooks/stripe &middot; local 0.74ms</div>
+                  <button class="replay-mini" id="demoReplay">&#8635; Replay</button>
+                </div>
+                <pre class="insp-code" id="demoPayload"></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="metrics">
+          <div class="metric-card">
+            <div class="metric-val cyan">+0.52 ms</div>
+            <div class="metric-label">Added p99 proxy latency</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-val emerald">36,275 req/s</div>
+            <div class="metric-label">Loopback throughput (32c)</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-val">3.5 MB</div>
+            <div class="metric-label">Stripped CLI binary size</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-val">6.9 MB</div>
+            <div class="metric-label">Post-load memory (RSS)</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features">
+      <div class="container">
+        <div class="sec-head">
+          <div class="sec-kicker">Built for the Hot Path</div>
+          <h2>Everything you need for local development, without SaaS friction.</h2>
+          <p class="sec-desc">
+            Engineered in pure Rust with Tokio, Axum, and Hyper. No garbage-collector pauses, no interstitial warning screens, and no arbitrary monthly request caps.
+          </p>
+        </div>
+
+        <div class="features">
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </div>
+            <h3>Zero-Copy Binary Multiplexing</h3>
+            <p>All concurrent HTTP requests and responses fly over a single persistent WebSocket using 9-byte binary headers and raw Bytes payloads.</p>
+          </article>
+
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </div>
+            <h3>Live Inspector &amp; Offline Replay</h3>
+            <p>Stream headers, pretty JSON, and microsecond latency via SSE on port 4040. Edit and replay webhooks in one click, or export JSON fixtures for offline testing.</p>
+          </article>
+
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </div>
+            <h3>Full WebSocket Passthrough</h3>
+            <p>Vite HMR, Next.js Fast Refresh, Socket.IO, and custom binary or text WebSocket apps work transparently through the tunnel.</p>
+          </article>
+
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3>Hardened for Public Relays</h3>
+            <p>Constant-time token and edge Basic Auth checks, configurable tunnel and body-size caps, idle zombie tunnel eviction, and localhost CSRF protection.</p>
+          </article>
+
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </div>
+            <h3>Free Single-Port Hosting</h3>
+            <p>Deploys to Render free tier or any container host with one port. Supports instant path routing (/t/&lt;id&gt;) or wildcard subdomains (*.yourdomain.com).</p>
+          </article>
+
+          <article class="feat">
+            <div class="feat-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+            </div>
+            <h3>Auto-Reconnect &amp; Live RTT</h3>
+            <p>Exponential backoff reconnects cleanly across sleep or spot restarts while periodic Ping/Pong frames track live tunnel round-trip latency.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="benchmarks">
+      <div class="container">
+        <div class="sec-head">
+          <div class="sec-kicker">Measured Performance</div>
+          <h2>Flat tail latency. Tiny footprint.</h2>
+          <p class="sec-desc">
+            Benchmarked with stripped thin-LTO release binaries on Apple M1 (macOS arm64): 3,000 HTTP requests at concurrency 32 with the live inspector enabled.
+          </p>
+        </div>
+
+        <div class="bench-grid">
+          <div class="bench-card">
+            <h3>Loopback Latency Percentiles (lower is better)</h3>
+            <p class="bench-sub">Direct localhost vs. full round-trip through localhop-server + localhop CLI + Inspector</p>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>p50 (median)</span><span>Direct 0.33ms &middot; localhop 0.81ms (+0.48ms)</span></div>
+              <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 35%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>p95</span><span>Direct 0.74ms &middot; localhop 1.51ms (+0.77ms)</span></div>
+              <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 65%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>p99</span><span>Direct 1.34ms &middot; localhop 1.86ms (+0.52ms)</span></div>
+              <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 80%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>p99.9</span><span>Direct 1.79ms &middot; localhop 2.33ms (+0.54ms)</span></div>
+              <div class="bar-track"><div class="bar-fill fill-indigo" style="width: 100%"></div></div>
+            </div>
+
+            <div class="bench-note">
+              Reproduce locally in one command: <code>./scripts/bench.sh</code>
+            </div>
+          </div>
+
+          <div class="bench-card">
+            <h3>Client Footprint vs. Go Tunnels</h3>
+            <p class="bench-sub">Stripped binary size and typical active RAM (RSS)</p>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>localhop CLI (Rust)</span><span>3.5 MB &middot; 6.9 MB RAM</span></div>
+              <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 11%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>localhop-server (Rust)</span><span>2.4 MB &middot; 5.6 MB RAM</span></div>
+              <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 8%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>ngrok CLI (Go)</span><span>25-40 MB &middot; 64-128 MB RAM</span></div>
+              <div class="bar-track"><div class="bar-fill fill-slate" style="width: 78%"></div></div>
+            </div>
+
+            <div class="bar-group">
+              <div class="bar-label"><span>cloudflared (Go)</span><span>30-50 MB &middot; 30-60 MB RAM</span></div>
+              <div class="bar-track"><div class="bar-fill fill-slate" style="width: 96%"></div></div>
+            </div>
+
+            <div class="bench-note">
+              Zero garbage collector means memory stays flat under sustained webhook and HMR bursts.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="compare">
+      <div class="container">
+        <div class="sec-head">
+          <div class="sec-kicker">Honest Comparison</div>
+          <h2>How localhop stacks up against ngrok and Cloudflare Tunnel.</h2>
+          <p class="sec-desc">
+            Every tool has trade-offs. Here is where localhop shines and where managed edge networks make more sense.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th class="hl">localhop</th>
+                <th>ngrok (Free)</th>
+                <th>Cloudflare Tunnel</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Runtime &amp; GC</td>
+                <td class="hl"><span class="yes">Rust (Zero GC)</span></td>
+                <td>Go (GC)</td>
+                <td>Go (GC)</td>
+              </tr>
+              <tr>
+                <td>CLI Binary Size</td>
+                <td class="hl"><strong>3.5 MB</strong> (relay: 2.4 MB)</td>
+                <td>~25 to 40 MB</td>
+                <td>~30 to 50 MB</td>
+              </tr>
+              <tr>
+                <td>Typical Memory (RSS)</td>
+                <td class="hl"><strong>4 to 7 MB</strong></td>
+                <td>64 to 128 MB</td>
+                <td>30 to 60 MB (idle)</td>
+              </tr>
+              <tr>
+                <td>Live Inspector &amp; Replay UI</td>
+                <td class="hl"><span class="yes">Built-in (:4040 + Offline JSON)</span></td>
+                <td><span class="yes">Built-in (:4040)</span></td>
+                <td class="muted">Not included</td>
+              </tr>
+              <tr>
+                <td>WebSocket Passthrough</td>
+                <td class="hl"><span class="yes">Full text &amp; binary</span></td>
+                <td><span class="yes">Supported</span></td>
+                <td><span class="yes">Supported</span></td>
+              </tr>
+              <tr>
+                <td>Monthly Request Cap</td>
+                <td class="hl"><span class="yes">Unlimited (self-hosted)</span></td>
+                <td class="warn">20,000 req/mo</td>
+                <td><span class="yes">Unlimited</span></td>
+              </tr>
+              <tr>
+                <td>Browser Warning Screen</td>
+                <td class="hl"><span class="yes">None</span></td>
+                <td class="warn">Shown on free tier</td>
+                <td><span class="yes">None</span></td>
+              </tr>
+              <tr>
+                <td>Self-Hosted &amp; Open Source</td>
+                <td class="hl"><span class="yes">MIT (Render / Docker)</span></td>
+                <td class="muted">Proprietary SaaS</td>
+                <td class="muted">Cloudflare edge required</td>
+              </tr>
+              <tr>
+                <td>Global Anycast PoPs</td>
+                <td class="hl">Bring your own region</td>
+                <td>Managed multi-region</td>
+                <td><span class="yes">200+ global PoPs</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <div class="container">
+        <div class="sec-head">
+          <div class="sec-kicker">60-Second Setup</div>
+          <h2>From clone to public URL in three commands.</h2>
+          <p class="sec-desc">
+            Run everything locally to test, or deploy your private relay on Render's free tier using the included Blueprint.
+          </p>
+        </div>
+
+        <div class="steps">
+          <div class="step">
+            <span class="step-num">1</span>
+            <h3>Start or Deploy the Relay</h3>
+            <p>Run locally with Cargo, or click New Blueprint on Render with the included <code>render.yaml</code>.</p>
+            <pre>cargo run --release -p localhop-server</pre>
+          </div>
+
+          <div class="step">
+            <span class="step-num">2</span>
+            <h3>Expose Your Local Port</h3>
+            <p>Point localhop at any local server (Next.js, Vite, Axum, FastAPI, Rails) with optional Basic Auth.</p>
+            <pre>localhop 3000 -s demo --basic-auth dev:secret</pre>
+          </div>
+
+          <div class="step">
+            <span class="step-num">3</span>
+            <h3>Inspect &amp; Replay Live</h3>
+            <p>Open the built-in inspector to view payloads, edit headers, copy cURL, or replay webhooks offline.</p>
+            <pre>open http://127.0.0.1:4040</pre>
+          </div>
+        </div>
+
+        <div class="cta-panel">
+          <h2>Own your tunnel. Keep every millisecond.</h2>
+          <p>
+            Star the repository, run the benchmark suite on your own machine, or deploy your private relay for free in under two minutes.
+          </p>
+          <div class="hero-actions" style="margin-bottom:0">
+            <a class="btn btn-primary" href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">Explore on GitHub</a>
+            <a class="btn btn-secondary" href="https://github.com/Leon24k/localhop/blob/main/README.md" target="_blank" rel="noopener">Read Documentation</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <div><strong>localhop</strong> &middot; MIT Licensed &middot; Built in Rust</div>
+      <div class="footer-links">
+        <a href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/Leon24k/localhop/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        <a href="https://github.com/Leon24k/localhop/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a>
+        <a href="https://github.com/Leon24k/localhop/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+        <a href="https://github.com/Leon24k/localhop/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const INSTALL_COMMANDS = {
+      cargo: "cargo install localhop",
+      npx: "npx localhop 3000 --server https://your-relay.onrender.com",
+      shell: "curl -fsSL https://raw.githubusercontent.com/Leon24k/localhop/main/scripts/install.sh | sh",
+      docker: "docker run -p 8080:8080 -e LOCALHOP_AUTH_TOKEN=secret localhop-server"
+    };
+
+    let activeTab = "cargo";
+    const installText = document.getElementById("installText");
+    const copyBtn = document.getElementById("copyInstall");
+
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        activeTab = btn.dataset.tab;
+        installText.textContent = INSTALL_COMMANDS[activeTab];
+      });
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(INSTALL_COMMANDS[activeTab]);
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1300);
+      } catch {
+        copyBtn.textContent = "Select & Copy";
+      }
+    });
+
+    const DEMO_RECORDS = [
+      {
+        meta: "POST /webhooks/stripe · local 0.74ms · total 1.26ms",
+        canReplay: true,
+        body: JSON.stringify({
+          id: "evt_1QxLocalhop99",
+          type: "invoice.paid",
+          data: { customer: "cus_rust_dev", amount_paid: 2900, currency: "usd" }
+        }, null, 2)
+      },
+      {
+        meta: "GET /api/users?limit=10 · local 0.38ms · total 0.89ms",
+        canReplay: true,
+        body: JSON.stringify({
+          ok: true,
+          count: 2,
+          headers_forwarded: ["x-forwarded-proto", "x-forwarded-host", "x-localhop-tunnel-id"],
+          latency_us: 380
+        }, null, 2)
+      },
+      {
+        meta: "WS /vite-hmr · 101 Switching Protocols · local 0.51ms",
+        canReplay: false,
+        body: JSON.stringify({
+          upgrade: "websocket",
+          transport: "multiplexed binary frame (10B header + raw Bytes)",
+          status: "connected"
+        }, null, 2)
+      }
+    ];
+
+    let activeDemo = 0;
+    const demoMeta = document.getElementById("demoMeta");
+    const demoPayload = document.getElementById("demoPayload");
+    const demoReplay = document.getElementById("demoReplay");
+
+    function renderDemo(idx) {
+      activeDemo = idx;
+      const rec = DEMO_RECORDS[idx];
+      demoMeta.textContent = rec.meta;
+      demoPayload.textContent = rec.body;
+      demoReplay.style.display = rec.canReplay ? "" : "none";
+      document.querySelectorAll(".insp-row").forEach((r) => {
+        r.classList.toggle("active", Number(r.dataset.idx) === idx);
+      });
+    }
+
+    document.querySelectorAll(".insp-row").forEach((row) => {
+      row.addEventListener("click", () => renderDemo(Number(row.dataset.idx)));
+    });
+
+    demoReplay.addEventListener("click", () => {
+      const rec = DEMO_RECORDS[activeDemo];
+      const ms = (0.42 + Math.random() * 0.35).toFixed(2);
+      demoReplay.textContent = "Replayed (" + ms + "ms)";
+      demoMeta.textContent = rec.meta.split("·")[0].trim() + " · replayed locally in " + ms + "ms";
+      setTimeout(() => { demoReplay.textContent = "\u21BB Replay"; }, 1400);
+    });
+
+    renderDemo(0);
+  </script>
+</body>
+</html>

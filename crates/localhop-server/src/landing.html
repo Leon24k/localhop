@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>localhop relay</title>
+  <style>
+    :root {
+      --bg: #070a10;
+      --card: #101726;
+      --border: rgba(148, 163, 184, 0.16);
+      --text: #f1f5f9;
+      --soft: #94a3b8;
+      --cyan: #38bdf8;
+      --emerald: #34d399;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(60% 45% at 50% 0%, rgba(56, 189, 248, 0.14), transparent 70%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .panel {
+      width: 100%;
+      max-width: 680px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 28px 70px -30px rgba(0, 0, 0, 0.85);
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 20px;
+      letter-spacing: -0.03em;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      color: #a7f3d0;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+    }
+    p { margin: 0 0 20px; color: var(--soft); line-height: 1.6; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    @media (max-width: 520px) { .stats { grid-template-columns: 1fr; } }
+    .stat {
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .stat strong {
+      display: block;
+      font-family: var(--mono);
+      font-size: 22px;
+      color: var(--cyan);
+      margin-bottom: 2px;
+    }
+    .stat span { font-size: 12px; color: var(--soft); }
+    pre {
+      margin: 0 0 18px;
+      padding: 14px 16px;
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-family: var(--mono);
+      font-size: 13px;
+      color: #e2e8f0;
+      overflow-x: auto;
+    }
+    .foot {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--soft);
+    }
+    .foot a { color: var(--cyan); text-decoration: none; }
+    .foot a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <div class="top">
+      <div class="brand">
+        <svg width="28" height="28" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+          <rect width="64" height="64" rx="15" fill="#0b1120" stroke="#38bdf8" stroke-width="2.5"/>
+          <circle cx="19" cy="43" r="6" fill="#34d399"/>
+          <circle cx="45" cy="23" r="6" fill="#38bdf8"/>
+          <path d="M22 37 C25 18, 37 14, 42 20" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+        <span>localhop relay</span>
+      </div>
+      <span class="badge"><span class="dot"></span>online</span>
+    </div>
+
+    <p>Zero-GC Rust localhost tunnel relay with multiplexed binary streaming, WebSocket passthrough, and built-in HTTP inspection.</p>
+
+    <div class="stats">
+      <div class="stat"><strong>__ACTIVE_TUNNELS__</strong><span>Active tunnels</span></div>
+      <div class="stat"><strong>__TOTAL_REQUESTS__</strong><span>Proxied requests</span></div>
+      <div class="stat"><strong>v__VERSION__</strong><span>Relay version</span></div>
+    </div>
+
+    <pre>localhop 3000 --server <span id="origin"></span></pre>
+
+    <div class="foot">
+      <a href="/_localhop/health">/_localhop/health</a>
+      <a href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">github.com/Leon24k/localhop</a>
+    </div>
+  </main>
+  <script>
+    document.getElementById("origin").textContent = window.location.origin;
+  </script>
+</body>
+</html>
