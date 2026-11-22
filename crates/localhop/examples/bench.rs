@@ -1,15 +1,15 @@
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use bytes::Bytes;
 use http::Request;
 use http_body_util::{BodyExt, Empty};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -100,7 +100,11 @@ async fn main() {
     }
 
     println!("Benchmarking {TOTAL_REQUESTS} requests @ concurrency {CONCURRENCY}");
-    let _ = run_load("direct (localhost)", "http://127.0.0.1:13001/ping".to_string()).await;
+    let _ = run_load(
+        "direct (localhost)",
+        "http://127.0.0.1:13001/ping".to_string(),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = run_load("through localhop", target_url).await;
 }

@@ -40,7 +40,7 @@
     .pill strong, .pill a { color: var(--text); text-decoration: none; }
     .pill a:hover { color: var(--accent); text-decoration: underline; }
 
-    .main { display: grid; grid-template-columns: 360px 1fr; flex: 1; min-height: 0; }
+    .main { display: grid; grid-template-columns: 370px 1fr; flex: 1; min-height: 0; }
     @media (max-width: 860px) { .main { grid-template-columns: 1fr; grid-template-rows: 260px 1fr; } }
 
     .sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
@@ -68,6 +68,7 @@
     .row:hover { background: var(--panel-2); }
     .row.active { background: #17253b; border-left: 2px solid var(--accent); padding-left: 8px; }
     .status { font-weight: 700; text-align: center; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .s1 { background: #26173d; color: var(--purple); }
     .s2 { background: #102a1a; color: var(--green); }
     .s3 { background: #102436; color: var(--accent); }
     .s4 { background: #2d2310; color: var(--yellow); }
@@ -136,6 +137,8 @@
     <aside class="sidebar">
       <div class="toolbar">
         <input id="filter" placeholder="Filter path, method, status…" />
+        <button id="importBtn" title="Import saved JSON fixture and replay offline">Import</button>
+        <input id="importFile" type="file" accept="application/json,.json" style="display:none" />
         <button id="clearBtn" title="Clear log">Clear</button>
       </div>
       <div id="list" class="list"></div>
@@ -151,13 +154,14 @@
         <div class="actions">
           <button id="replayBtn" class="primary">↻ Replay</button>
           <button id="editReplayBtn">✎ Edit &amp; Replay</button>
+          <button id="exportBtn">↓ Export JSON</button>
           <button id="curlBtn">Copy cURL</button>
         </div>
       </div>
       <div id="detailContent" class="detail-body">
         <div class="empty" style="grid-column:1/-1">
           <h3>Waiting for incoming requests…</h3>
-          <p>Hit your public tunnel URL and every request/webhook will stream here in real time.</p>
+          <p>Hit your public tunnel URL and every request/webhook will stream here in real time, or click <code>Import</code> to replay a saved JSON fixture offline.</p>
         </div>
       </div>
     </section>
@@ -192,7 +196,7 @@ const state = { status: null, records: [], selectedId: null, filter: '' };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const statusClass = (s) => s >= 500 || s === 0 ? 's5' : s >= 400 ? 's4' : s >= 300 ? 's3' : 's2';
+const statusClass = (s) => s >= 500 || s === 0 ? 's5' : s >= 400 ? 's4' : s >= 300 ? 's3' : s >= 200 ? 's2' : 's1';
 const fmtUs = (us) => us == null ? '—' : (us < 1000 ? `${us}µs` : `${(us / 1000).toFixed(2)}ms`);
 
 function prettyBody(str) {
@@ -260,9 +264,15 @@ function renderDetail() {
   $('dMethod').textContent = r.method;
   $('dPath').textContent = r.path_and_query;
 
+  const isWs = r.method === 'WS';
+  $('replayBtn').style.display = isWs ? 'none' : '';
+  $('editReplayBtn').style.display = isWs ? 'none' : '';
+  $('exportBtn').style.display = isWs ? 'none' : '';
+  $('curlBtn').style.display = isWs ? 'none' : '';
+
   $('detailContent').innerHTML = `
     <div class="card">
-      <div class="card-h"><span>Request (${r.source})</span><span>${r.request_bytes} B</span></div>
+      <div class="card-h"><span>Request (${esc(r.source)})</span><span>${r.request_bytes} B</span></div>
       <div class="card-c">
         ${renderHeadersTable(r.request_headers)}
         <pre class="payload">${esc(prettyBody(r.request_body))}</pre>
@@ -294,6 +304,43 @@ async function sendReplay(payload) {
 
 $('filter').oninput = (e) => { state.filter = e.target.value; renderList(); };
 $('clearBtn').onclick = async () => { await fetch('/api/clear', { method: 'POST' }); };
+
+$('importBtn').onclick = () => $('importFile').click();
+$('importFile').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const fixture = JSON.parse(await file.text());
+    await sendReplay({
+      method: fixture.method || 'POST',
+      path_and_query: fixture.path_and_query || '/',
+      headers: fixture.headers || fixture.request_headers || [],
+      body: fixture.body ?? fixture.request_body ?? '',
+    });
+  } catch (err) {
+    alert('Invalid fixture JSON: ' + err.message);
+  } finally {
+    e.target.value = '';
+  }
+};
+
+$('exportBtn').onclick = () => {
+  const r = selectedRecord();
+  if (!r) return;
+  const fixture = {
+    method: r.method,
+    path_and_query: r.path_and_query,
+    headers: r.request_headers,
+    body: r.request_body,
+  };
+  const blob = new Blob([JSON.stringify(fixture, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `localhop-${r.method.toLowerCase()}-${r.id}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
 $('replayBtn').onclick = () => {
   const r = selectedRecord();

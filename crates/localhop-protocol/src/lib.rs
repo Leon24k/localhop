@@ -4,9 +4,9 @@ use std::fmt;
 
 /// Compact binary frame tags for zero-overhead multiplexed tunneling.
 ///
-/// Hot-path body frames (`RequestBody`, `ResponseBody`) carry a 9-byte header
-/// (`1B tag + 8B req_id`) followed immediately by raw payload bytes—zero JSON
-/// or base64 serialization overhead.
+/// Hot-path payload frames (`RequestBody`, `ResponseBody`, `WsMessage`) carry a
+/// tiny fixed binary header followed directly by raw `Bytes`—zero JSON or base64
+/// serialization overhead on streamed data.
 pub mod tag {
     pub const HELLO: u8 = 0x01;
     pub const WELCOME: u8 = 0x02;
@@ -19,12 +19,19 @@ pub mod tag {
     pub const RESPONSE_END: u8 = 0x09;
     pub const PING: u8 = 0x0A;
     pub const PONG: u8 = 0x0B;
+    pub const WS_OPEN: u8 = 0x0C;
+    pub const WS_OPENED: u8 = 0x0D;
+    pub const WS_MESSAGE: u8 = 0x0E;
+    pub const WS_CLOSE: u8 = 0x0F;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hello {
     pub requested_id: Option<String>,
     pub token: Option<String>,
+    /// Optional HTTP Basic Auth credential in `user:pass` format enforced at the relay edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic_auth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,19 +62,58 @@ pub struct ResponseHead {
     pub local_latency_us: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsOpen {
+    pub req_id: u64,
+    pub path_and_query: String,
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsOpened {
+    pub req_id: u64,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Frame {
     Hello(Hello),
     Welcome(Welcome),
     Error(ProtocolErrorMsg),
     RequestHead(RequestHead),
-    RequestBody { req_id: u64, chunk: Bytes },
-    RequestEnd { req_id: u64 },
+    RequestBody {
+        req_id: u64,
+        chunk: Bytes,
+    },
+    RequestEnd {
+        req_id: u64,
+    },
     ResponseHead(ResponseHead),
-    ResponseBody { req_id: u64, chunk: Bytes },
-    ResponseEnd { req_id: u64 },
-    Ping { ts_us: u64 },
-    Pong { ts_us: u64 },
+    ResponseBody {
+        req_id: u64,
+        chunk: Bytes,
+    },
+    ResponseEnd {
+        req_id: u64,
+    },
+    Ping {
+        ts_us: u64,
+    },
+    Pong {
+        ts_us: u64,
+    },
+    WsOpen(WsOpen),
+    WsOpened(WsOpened),
+    WsMessage {
+        req_id: u64,
+        is_binary: bool,
+        payload: Bytes,
+    },
+    WsClose {
+        req_id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -104,13 +150,25 @@ impl Frame {
             Frame::Welcome(v) => encode_json(tag::WELCOME, v),
             Frame::Error(v) => encode_json(tag::ERROR, v),
             Frame::RequestHead(v) => encode_json(tag::REQUEST_HEAD, v),
-            Frame::RequestBody { req_id, chunk } => Ok(encode_body(tag::REQUEST_BODY, *req_id, chunk)),
+            Frame::RequestBody { req_id, chunk } => {
+                Ok(encode_body(tag::REQUEST_BODY, *req_id, chunk))
+            }
             Frame::RequestEnd { req_id } => Ok(encode_u64(tag::REQUEST_END, *req_id)),
             Frame::ResponseHead(v) => encode_json(tag::RESPONSE_HEAD, v),
-            Frame::ResponseBody { req_id, chunk } => Ok(encode_body(tag::RESPONSE_BODY, *req_id, chunk)),
+            Frame::ResponseBody { req_id, chunk } => {
+                Ok(encode_body(tag::RESPONSE_BODY, *req_id, chunk))
+            }
             Frame::ResponseEnd { req_id } => Ok(encode_u64(tag::RESPONSE_END, *req_id)),
             Frame::Ping { ts_us } => Ok(encode_u64(tag::PING, *ts_us)),
             Frame::Pong { ts_us } => Ok(encode_u64(tag::PONG, *ts_us)),
+            Frame::WsOpen(v) => encode_json(tag::WS_OPEN, v),
+            Frame::WsOpened(v) => encode_json(tag::WS_OPENED, v),
+            Frame::WsMessage {
+                req_id,
+                is_binary,
+                payload,
+            } => Ok(encode_ws_message(*req_id, *is_binary, payload)),
+            Frame::WsClose { req_id } => Ok(encode_u64(tag::WS_CLOSE, *req_id)),
         }
     }
 
@@ -147,6 +205,24 @@ impl Frame {
             tag::PONG => Ok(Frame::Pong {
                 ts_us: decode_u64(&payload)?,
             }),
+            tag::WS_OPEN => Ok(Frame::WsOpen(serde_json::from_slice(&payload)?)),
+            tag::WS_OPENED => Ok(Frame::WsOpened(serde_json::from_slice(&payload)?)),
+            tag::WS_MESSAGE => {
+                if payload.len() < 9 {
+                    return Err(CodecError::TruncatedFrame);
+                }
+                let req_id = decode_u64(&payload[..8])?;
+                let is_binary = payload[8] != 0;
+                let msg_payload = payload.slice(9..);
+                Ok(Frame::WsMessage {
+                    req_id,
+                    is_binary,
+                    payload: msg_payload,
+                })
+            }
+            tag::WS_CLOSE => Ok(Frame::WsClose {
+                req_id: decode_u64(&payload)?,
+            }),
             other => Err(CodecError::UnknownTag(other)),
         }
     }
@@ -165,6 +241,15 @@ fn encode_body(frame_tag: u8, req_id: u64, chunk: &Bytes) -> Bytes {
     buf.put_u8(frame_tag);
     buf.put_u64(req_id);
     buf.put_slice(chunk);
+    buf.freeze()
+}
+
+fn encode_ws_message(req_id: u64, is_binary: bool, payload: &Bytes) -> Bytes {
+    let mut buf = BytesMut::with_capacity(10 + payload.len());
+    buf.put_u8(tag::WS_MESSAGE);
+    buf.put_u64(req_id);
+    buf.put_u8(u8::from(is_binary));
+    buf.put_slice(payload);
     buf.freeze()
 }
 
@@ -221,6 +306,48 @@ pub fn is_valid_tunnel_id(id: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Constant-time equality check to avoid timing side-channels on auth tokens & credentials.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Builds the expected `Authorization` header value (`Basic <base64>`) for a `user:pass` string.
+pub fn format_basic_auth_header(user_pass: &str) -> String {
+    format!("Basic {}", base64_encode(user_pass.as_bytes()))
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,12 +393,96 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_ws_frames() {
+        let open = Frame::WsOpen(WsOpen {
+            req_id: 99,
+            path_and_query: "/ws/chat?room=1".into(),
+            headers: vec![("origin".into(), "https://example.com".into())],
+        })
+        .encode()
+        .unwrap();
+        assert!(matches!(Frame::decode(open).unwrap(), Frame::WsOpen(w) if w.req_id == 99));
+
+        let msg = Frame::WsMessage {
+            req_id: 99,
+            is_binary: true,
+            payload: Bytes::from_static(&[1, 2, 3, 4]),
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(msg.len(), 14);
+        match Frame::decode(msg).unwrap() {
+            Frame::WsMessage {
+                req_id,
+                is_binary,
+                payload,
+            } => {
+                assert_eq!(req_id, 99);
+                assert!(is_binary);
+                assert_eq!(payload.as_ref(), &[1, 2, 3, 4]);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+
+        let close = Frame::WsClose { req_id: 99 }.encode().unwrap();
+        assert_eq!(close.len(), 9);
+        assert!(matches!(
+            Frame::decode(close).unwrap(),
+            Frame::WsClose { req_id: 99 }
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_frames() {
+        assert!(matches!(
+            Frame::decode(Bytes::new()),
+            Err(CodecError::EmptyFrame)
+        ));
+        assert!(matches!(
+            Frame::decode(Bytes::from_static(&[0xFF])),
+            Err(CodecError::UnknownTag(0xFF))
+        ));
+        assert!(matches!(
+            Frame::decode(Bytes::from_static(&[tag::REQUEST_END, 1, 2, 3])),
+            Err(CodecError::TruncatedFrame)
+        ));
+        assert!(matches!(
+            Frame::decode(Bytes::from_static(&[
+                tag::WS_MESSAGE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1
+            ])),
+            Err(CodecError::TruncatedFrame)
+        ));
+    }
+
+    #[test]
     fn validates_tunnel_ids() {
         assert!(is_valid_tunnel_id("my-app-1"));
         assert!(is_valid_tunnel_id("abc"));
         assert!(!is_valid_tunnel_id("ab"));
         assert!(!is_valid_tunnel_id("-bad"));
+        assert!(!is_valid_tunnel_id("bad-"));
         assert!(!is_valid_tunnel_id("BadUpper"));
         assert!(!is_valid_tunnel_id("no/slash"));
+    }
+
+    #[test]
+    fn constant_time_and_basic_auth() {
+        assert!(constant_time_eq(b"secret123", b"secret123"));
+        assert!(!constant_time_eq(b"secret123", b"secret124"));
+        assert!(!constant_time_eq(b"short", b"longer"));
+        assert_eq!(
+            format_basic_auth_header("admin:s3cr3t"),
+            "Basic YWRtaW46czNjcjN0"
+        );
+        assert_eq!(format_basic_auth_header("a:b"), "Basic YTpi");
+        assert_eq!(format_basic_auth_header("user:p"), "Basic dXNlcjpw");
     }
 }

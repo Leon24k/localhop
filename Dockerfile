@@ -9,13 +9,14 @@ COPY crates/localhop-server/Cargo.toml crates/localhop-server/Cargo.toml
 COPY crates/localhop/Cargo.toml crates/localhop/Cargo.toml
 RUN mkdir -p crates/localhop-protocol/src crates/localhop-server/src crates/localhop/src \
  && echo "pub fn _stub() {}" > crates/localhop-protocol/src/lib.rs \
+ && echo "pub fn _stub() {}" > crates/localhop-server/src/lib.rs \
  && echo "fn main() {}" > crates/localhop-server/src/main.rs \
  && echo "fn main() {}" > crates/localhop/src/main.rs \
  && cargo build --release --bin localhop-server || true
 
 # Build actual source
 COPY crates ./crates
-RUN touch crates/localhop-protocol/src/lib.rs crates/localhop-server/src/main.rs \
+RUN touch crates/localhop-protocol/src/lib.rs crates/localhop-server/src/lib.rs crates/localhop-server/src/main.rs \
  && cargo build --release --bin localhop-server
 
 FROM debian:bookworm-slim

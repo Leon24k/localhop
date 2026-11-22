@@ -39,10 +39,11 @@ Most commercial tunnels enforce monthly request caps, browser interstitial warni
 **`localhop`** combines both in two tiny, zero-GC Rust binaries:
 
 - **Sub-Millisecond Proxy Overhead** — Multiplexed binary framing (`9 B` header + raw `bytes::Bytes` chunks) streams HTTP bodies without base64/JSON serialization overhead or garbage-collector pauses.
-- **Built-In Live Inspector & Replay (`localhost:4040`)** — Watch incoming requests and webhooks stream live over SSE with pretty-printed JSON, headers, microsecond latency breakdown, **1-click Replay**, **Edit & Replay**, and **Copy as cURL**.
+- **Full WebSocket Passthrough** — Works seamlessly with Vite HMR, Next.js Fast Refresh, Socket.IO, and custom WebSocket backends over the same multiplexed tunnel.
+- **Built-In Live Inspector & Offline Replay (`localhost:4040`)** — Watch incoming requests and webhooks stream live over SSE with pretty-printed JSON, headers, microsecond latency breakdown, **1-click Replay**, **Edit & Replay**, **Export/Import JSON fixtures**, and **Copy as cURL**.
+- **Production-Hardened Out of the Box** — Constant-time auth token & `--basic-auth` edge checks, `X-Forwarded-*` proxy headers, configurable body & tunnel caps, zombie tunnel eviction, and localhost CSRF protection on the Inspector API.
 - **Flat Memory Under Load** — Lock-free routing (`DashMap`) + a bounded 200-request ring buffer keep RSS around **~4–7 MB** even after thousands of concurrent requests.
 - **$0 Self-Hostable Relay** — Speaks single-port HTTP + WebSocket so you can host your own private relay for free on **Render** (no VPS, no raw TCP/UDP port config, no browser warning page, no request caps).
-- **Dual Routing Out of the Box** — Works immediately via path routing (`/t/<id>/...`) with zero DNS setup, or classic wildcard subdomains (`<id>.yourdomain.com`) when you attach a custom domain.
 
 ---
 
@@ -222,6 +223,9 @@ Tunnels will automatically be issued clean subdomain URLs like `https://myapp.ho
 | `--server <URL>` | `LOCALHOP_SERVER` | `ws://127.0.0.1:8080` | Public relay URL (`http`/`https`/`ws`/`wss`) |
 | `-s, --id <ID>` | — | random 8-char | Request a custom tunnel ID / subdomain (`3–32` chars) |
 | `--token <SECRET>` | `LOCALHOP_AUTH_TOKEN` | none | Auth token if your relay requires one |
+| `--basic-auth <U:P>` | `LOCALHOP_BASIC_AUTH` | none | Protect public tunnel URL with HTTP Basic Auth at the edge |
+| `--preserve-host` | — | `false` | Forward incoming `Host` header instead of rewriting to `<host>:<port>` |
+| `-q, --quiet` | — | `false` | Suppress per-request terminal access logs |
 | `--inspector-port <PORT>` | — | `4040` | Port for the built-in live inspector UI |
 | `--no-inspector` | — | `false` | Headless mode (disables local web UI) |
 
@@ -233,8 +237,11 @@ Tunnels will automatically be issued clean subdomain URLs like `https://myapp.ho
 | `-p, --port <PORT>` | `PORT` | `8080` | Listening HTTP/WebSocket port |
 | `--public-url <URL>` | `LOCALHOP_PUBLIC_URL` | auto-detected | Override inferred public base URL |
 | `--base-domain <DOMAIN>` | `LOCALHOP_BASE_DOMAIN` | none | Enable `*.<domain>` subdomain routing |
-| `--auth-token <SECRET>` | `LOCALHOP_AUTH_TOKEN` | none | Require token authentication from CLI clients |
+| `--auth-token <SECRET>` | `LOCALHOP_AUTH_TOKEN` | none | Require constant-time token authentication from CLI clients |
 | `--timeout-secs <SECS>` | `LOCALHOP_TIMEOUT_SECS` | `60` | Upstream response timeout |
+| `--max-tunnels <N>` | `LOCALHOP_MAX_TUNNELS` | `1000` | Maximum simultaneous active tunnels |
+| `--max-body-bytes <B>` | `LOCALHOP_MAX_BODY_BYTES` | `52428800` | Maximum HTTP request body size (`50 MiB` default) |
+| `--idle-timeout-secs <S>` | `LOCALHOP_IDLE_TIMEOUT_SECS` | `45` | Evict dead/zombie tunnels after idle timeout |
 
 ---
 
@@ -282,10 +289,17 @@ localhop/
 
 ## Roadmap
 
+- [x] Full **WebSocket passthrough** for proxied local apps (Vite HMR, Next.js Fast Refresh, Socket.IO)
+- [x] **Offline webhook fixtures** — export/import captured requests as JSON and replay without an active tunnel
+- [x] Edge **HTTP Basic Auth** (`--basic-auth`), body/tunnel DoS caps, and idle zombie tunnel eviction
 - [ ] Optional **QUIC (`quinn`)** transport (`--quic`) for 0-RTT UDP tunneling on VPS hosts
-- [ ] Full **WebSocket passthrough** for proxied local apps (Vite HMR, Next.js Fast Refresh, Socket.IO)
-- [ ] **Offline webhook fixtures** — export/import captured requests as JSON and replay without an active tunnel
 - [ ] Optional **Ed25519 keypair auth** & multi-tunnel config file (`localhop.toml`)
+
+## Security & Contributing
+
+- Security policy & architecture notes: [SECURITY.md](./SECURITY.md)
+- Contributing guide: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Release history: [CHANGELOG.md](./CHANGELOG.md)
 
 ## License
 

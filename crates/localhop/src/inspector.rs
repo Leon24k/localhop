@@ -1,12 +1,12 @@
 use axum::{
+    Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         Html, IntoResponse,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
 use futures_util::Stream;
@@ -16,13 +16,13 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, RwLock};
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio::sync::{RwLock, broadcast};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use crate::forwarder::LocalForwarder;
 
@@ -159,7 +159,11 @@ pub fn format_body_preview(buf: &[u8], total_len: usize) -> String {
         return String::new();
     }
     let suffix = if total_len > buf.len() {
-        format!("\n… [truncated, showing {} of {} bytes]", buf.len(), total_len)
+        format!(
+            "\n… [truncated, showing {} of {} bytes]",
+            buf.len(),
+            total_len
+        )
     } else {
         String::new()
     };
@@ -172,6 +176,7 @@ pub fn format_body_preview(buf: &[u8], total_len: usize) -> String {
 struct InspectorAppState {
     hub: Arc<InspectorHub>,
     forwarder: Arc<LocalForwarder>,
+    bound_port: u16,
 }
 
 #[derive(Serialize)]
@@ -190,12 +195,34 @@ struct ReplayRequest {
     body: String,
 }
 
+/// Guards mutating localhost APIs against cross-origin browser CSRF.
+fn is_allowed_local_origin(headers: &HeaderMap, port: u16) -> bool {
+    let Some(origin) = headers
+        .get(http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        // Non-browser clients (curl/CLI) omit Origin
+        return true;
+    };
+    origin == format!("http://127.0.0.1:{port}")
+        || origin == format!("http://localhost:{port}")
+        || origin == format!("http://[::1]:{port}")
+}
+
 pub async fn start_inspector_server(
     port: u16,
     hub: Arc<InspectorHub>,
     forwarder: Arc<LocalForwarder>,
 ) -> Result<SocketAddr, std::io::Error> {
-    let state = Arc::new(InspectorAppState { hub, forwarder });
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+
+    let state = Arc::new(InspectorAppState {
+        hub,
+        forwarder,
+        bound_port: local_addr.port(),
+    });
 
     let app = Router::new()
         .route("/", get(|| async { Html(INSPECTOR_HTML) }))
@@ -204,10 +231,6 @@ pub async fn start_inspector_server(
         .route("/api/replay", post(replay_handler))
         .route("/api/clear", post(clear_handler))
         .with_state(state);
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
 
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -238,8 +261,13 @@ async fn sse_events(
 
 async fn replay_handler(
     State(state): State<Arc<InspectorAppState>>,
+    headers: HeaderMap,
     Json(req): Json<ReplayRequest>,
 ) -> impl IntoResponse {
+    if !is_allowed_local_origin(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "cross-origin replay blocked").into_response();
+    }
+
     let body_bytes = Bytes::from(req.body.into_bytes());
     let record = state
         .forwarder
@@ -253,10 +281,16 @@ async fn replay_handler(
         .await;
 
     state.hub.push_record(record.clone()).await;
-    (StatusCode::OK, Json(record))
+    (StatusCode::OK, Json(record)).into_response()
 }
 
-async fn clear_handler(State(state): State<Arc<InspectorAppState>>) -> StatusCode {
+async fn clear_handler(
+    State(state): State<Arc<InspectorAppState>>,
+    headers: HeaderMap,
+) -> StatusCode {
+    if !is_allowed_local_origin(&headers, state.bound_port) {
+        return StatusCode::FORBIDDEN;
+    }
     state.hub.clear().await;
     StatusCode::NO_CONTENT
 }
