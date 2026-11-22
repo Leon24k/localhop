@@ -12,7 +12,7 @@ use axum::{
 use bytes::Bytes;
 use clap::Parser;
 use dashmap::DashMap;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use http_body_util::BodyExt;
 use localhop_protocol::{
     Frame, Hello, ProtocolErrorMsg, RequestHead, ResponseHead, Welcome, WsOpen, WsOpened,
@@ -21,11 +21,13 @@ use localhop_protocol::{
 use rand::Rng;
 use serde::Serialize;
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -35,6 +37,7 @@ use tracing::{debug, info, warn};
 const OUTBOUND_CHANNEL_CAPACITY: usize = 512;
 const BODY_CHANNEL_CAPACITY: usize = 64;
 const WS_CHANNEL_CAPACITY: usize = 128;
+const MAX_TRACKED_RATE_LIMIT_IPS: usize = 10_000;
 const RELAY_LANDING_HTML: &str = include_str!("landing.html");
 
 #[derive(Parser, Debug, Clone)]
@@ -79,6 +82,10 @@ pub struct Config {
     /// Disconnect idle/zombie tunnels if no frame or ping arrives within this many seconds
     #[arg(long, env = "LOCALHOP_IDLE_TIMEOUT_SECS", default_value_t = 45)]
     pub idle_timeout_secs: u64,
+
+    /// Per-IP HTTP request rate limit in requests/sec (0 = unlimited)
+    #[arg(long, env = "LOCALHOP_RATE_LIMIT_RPS", default_value_t = 0)]
+    pub rate_limit_rps: u32,
 }
 
 impl Default for Config {
@@ -93,6 +100,53 @@ impl Default for Config {
             max_tunnels: 1000,
             max_body_bytes: 52_428_800,
             idle_timeout_secs: 45,
+            rate_limit_rps: 0,
+        }
+    }
+}
+
+struct TokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+struct IpRateLimiter {
+    rps: f64,
+    burst: f64,
+    buckets: DashMap<IpAddr, TokenBucket>,
+}
+
+impl IpRateLimiter {
+    fn new(rps: u32) -> Self {
+        let rps_f = f64::from(rps);
+        let burst = (rps_f * 2.0).max(1.0);
+        Self {
+            rps: rps_f,
+            burst,
+            buckets: DashMap::new(),
+        }
+    }
+
+    fn allow(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        if self.buckets.len() > MAX_TRACKED_RATE_LIMIT_IPS {
+            self.buckets
+                .retain(|_, b| now.duration_since(b.last_refill) < Duration::from_secs(60));
+        }
+
+        let mut entry = self.buckets.entry(ip).or_insert_with(|| TokenBucket {
+            tokens: self.burst,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens = (entry.tokens + elapsed * self.rps).min(self.burst);
+        entry.last_refill = now;
+
+        if entry.tokens >= 1.0 {
+            entry.tokens -= 1.0;
+            true
+        } else {
+            false
         }
     }
 }
@@ -112,7 +166,6 @@ struct TunnelSession {
     pending_http: DashMap<u64, PendingResponse>,
     pending_ws: DashMap<u64, PendingWs>,
     next_req_id: AtomicU64,
-    /// Pre-encoded `Basic <base64>` header if the tunnel owner enabled `--basic-auth`.
     expected_basic_auth: Option<String>,
 }
 
@@ -128,9 +181,46 @@ impl TunnelSession {
     }
 }
 
+/// Streams body chunks from a tunnel and automatically sends `Frame::Cancel`
+/// if the public HTTP client disconnects before `ResponseEnd`.
+struct CancelOnDropStream {
+    inner: ReceiverStream<Result<Bytes, std::io::Error>>,
+    session: Arc<TunnelSession>,
+    req_id: u64,
+    completed: bool,
+}
+
+impl Stream for CancelOnDropStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let res = Pin::new(&mut self.inner).poll_next(cx);
+        if matches!(res, Poll::Ready(None)) {
+            self.completed = true;
+        }
+        res
+    }
+}
+
+impl Drop for CancelOnDropStream {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.session.pending_http.remove(&self.req_id);
+            if let Ok(bytes) = (Frame::Cancel {
+                req_id: self.req_id,
+            })
+            .encode()
+            {
+                let _ = self.session.outbound_tx.try_send(bytes);
+            }
+        }
+    }
+}
+
 pub struct AppState {
     pub config: Config,
     tunnels: DashMap<String, Arc<TunnelSession>>,
+    rate_limiter: Option<IpRateLimiter>,
     total_requests: AtomicU64,
     started_at: Instant,
 }
@@ -151,12 +241,20 @@ struct HealthResponse {
     uptime_secs: u64,
     subdomain_routing: bool,
     auth_required: bool,
+    rate_limit_rps: u32,
 }
 
 pub fn build_router(config: Config) -> (Router, Arc<AppState>) {
+    let rate_limiter = if config.rate_limit_rps > 0 {
+        Some(IpRateLimiter::new(config.rate_limit_rps))
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         config,
         tunnels: DashMap::new(),
+        rate_limiter,
         total_requests: AtomicU64::new(0),
         started_at: Instant::now(),
     });
@@ -182,6 +280,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         uptime_secs: state.started_at.elapsed().as_secs(),
         subdomain_routing: state.config.base_domain.is_some(),
         auth_required: state.config.auth_token.is_some(),
+        rate_limit_rps: state.config.rate_limit_rps,
     })
 }
 
@@ -242,7 +341,6 @@ fn generate_tunnel_id() -> String {
 async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_base: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // 1. Expect initial Hello frame within 10 seconds
     let hello = match tokio::time::timeout(Duration::from_secs(10), ws_rx.next()).await {
         Ok(Some(Ok(Message::Binary(raw)))) => match Frame::decode(raw) {
             Ok(Frame::Hello(h)) => h,
@@ -258,7 +356,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         _ => return,
     };
 
-    // 2. Authenticate in constant time if server requires a token
     if let Some(expected) = &state.config.auth_token {
         let ok = hello
             .token
@@ -271,7 +368,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         }
     }
 
-    // 3. Enforce max tunnel capacity
     if state.tunnels.len() >= state.config.max_tunnels {
         let _ = send_error_frame(
             &mut ws_tx,
@@ -281,7 +377,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         return;
     }
 
-    // 4. Validate optional Basic Auth format (`user:pass`)
     if let Some(ref creds) = hello.basic_auth
         && !creds.contains(':')
     {
@@ -289,7 +384,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         return;
     }
 
-    // 5. Allocate tunnel ID & register atomically
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_CAPACITY);
     let session = Arc::new(TunnelSession::new(
         outbound_tx.clone(),
@@ -318,7 +412,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         return;
     }
 
-    // 6. Dedicated writer task so reads never stall on writes
     let writer_handle = tokio::spawn(async move {
         while let Some(frame_bytes) = outbound_rx.recv().await {
             if ws_tx.send(Message::Binary(frame_bytes)).await.is_err() {
@@ -327,7 +420,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         }
     });
 
-    // 7. Reader loop with idle timeout to evict dead/zombie clients cleanly
     let idle_timeout = Duration::from_secs(state.config.idle_timeout_secs);
     loop {
         let next_msg = match tokio::time::timeout(idle_timeout, ws_rx.next()).await {
@@ -338,7 +430,11 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
             }
             Ok(None) => break,
             Err(_) => {
-                warn!(tunnel_id = %tunnel_id, "evicting idle/zombie tunnel after {}s", state.config.idle_timeout_secs);
+                warn!(
+                    tunnel_id = %tunnel_id,
+                    "evicting idle/zombie tunnel after {}s",
+                    state.config.idle_timeout_secs
+                );
                 break;
             }
         };
@@ -402,7 +498,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
         }
     }
 
-    // 8. Clean up tunnel & unblock all in-flight HTTP/WS streams
     state.tunnels.remove(&tunnel_id);
     session.pending_http.clear();
     session.pending_ws.clear();
@@ -468,7 +563,8 @@ async fn path_tunnel_root(
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     let target_path = format!("/{query}");
-    proxy_to_tunnel(state, &id, target_path, req).await
+    let prefix = format!("/t/{id}");
+    proxy_to_tunnel(state, &id, target_path, Some(&prefix), req).await
 }
 
 async fn path_tunnel_rest(
@@ -482,7 +578,8 @@ async fn path_tunnel_rest(
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     let target_path = format!("/{rest}{query}");
-    proxy_to_tunnel(state, &id, target_path, req).await
+    let prefix = format!("/t/{id}");
+    proxy_to_tunnel(state, &id, target_path, Some(&prefix), req).await
 }
 
 async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -506,7 +603,7 @@ async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request<Body>
                 .path_and_query()
                 .map(|pq| pq.as_str().to_string())
                 .unwrap_or_else(|| "/".to_string());
-            return proxy_to_tunnel(state, &sub, path_and_query, req).await;
+            return proxy_to_tunnel(state, &sub, path_and_query, None, req).await;
         }
     }
 
@@ -557,6 +654,33 @@ fn unauthorized_basic_response() -> Response {
         )
         .body(Body::from("localhop: authentication required"))
         .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response())
+}
+
+fn extract_client_ip(req: &Request<Body>) -> Option<IpAddr> {
+    if let Some(xff) = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        && let Some(first) = xff.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return Some(ip);
+    }
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+fn rewrite_location_for_path_prefix(val: &str, path_prefix: &str) -> String {
+    if val.starts_with('/')
+        && !val.starts_with("//")
+        && !val.starts_with(&format!("{path_prefix}/"))
+        && val != path_prefix
+    {
+        format!("{path_prefix}{val}")
+    } else {
+        val.to_string()
+    }
 }
 
 fn collect_forwarded_headers(
@@ -613,8 +737,20 @@ async fn proxy_to_tunnel(
     state: Arc<AppState>,
     tunnel_id: &str,
     path_and_query: String,
+    path_prefix: Option<&str>,
     req: Request<Body>,
 ) -> Response {
+    if let Some(limiter) = &state.rate_limiter
+        && let Some(ip) = extract_client_ip(&req)
+        && !limiter.allow(ip)
+    {
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header(http::header::RETRY_AFTER, "1")
+            .body(Body::from("localhop: rate limit exceeded"))
+            .unwrap_or_else(|_| StatusCode::TOO_MANY_REQUESTS.into_response());
+    }
+
     let Some(session) = state.tunnels.get(tunnel_id).map(|e| e.value().clone()) else {
         return (
             StatusCode::BAD_GATEWAY,
@@ -627,12 +763,10 @@ async fn proxy_to_tunnel(
         return unauthorized_basic_response();
     }
 
-    // Handle WebSocket upgrade passthrough (Vite HMR, Next.js Fast Refresh, Socket.IO, etc.)
     if is_websocket_upgrade(req.headers()) {
         return proxy_ws_to_tunnel(state, session, tunnel_id, path_and_query, req).await;
     }
 
-    // Enforce declared Content-Length limit before allocating stream work
     if let Some(cl) = req
         .headers()
         .get(http::header::CONTENT_LENGTH)
@@ -692,7 +826,6 @@ async fn proxy_to_tunnel(
         return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
     }
 
-    // Stream request body chunks concurrently with strict max_body_bytes enforcement
     let outbound_tx = session.outbound_tx.clone();
     let max_body = state.config.max_body_bytes;
     tokio::spawn(async move {
@@ -726,7 +859,6 @@ async fn proxy_to_tunnel(
         }
     });
 
-    // Wait for ResponseHead from the local agent
     let timeout = Duration::from_secs(state.config.timeout_secs);
     let resp_head = match tokio::time::timeout(timeout, head_rx).await {
         Ok(Ok(head)) => head,
@@ -736,6 +868,9 @@ async fn proxy_to_tunnel(
         }
         Err(_) => {
             session.pending_http.remove(&req_id);
+            if let Ok(cancel) = (Frame::Cancel { req_id }).encode() {
+                let _ = session.outbound_tx.try_send(cancel);
+            }
             return (StatusCode::GATEWAY_TIMEOUT, "localhop: upstream timed out").into_response();
         }
     };
@@ -748,9 +883,16 @@ async fn proxy_to_tunnel(
             if is_hop_by_hop_header(&name) {
                 continue;
             }
+            let effective_val = if name.eq_ignore_ascii_case("location")
+                && let Some(prefix) = path_prefix
+            {
+                rewrite_location_for_path_prefix(&val, prefix)
+            } else {
+                val
+            };
             if let (Ok(hn), Ok(hv)) = (
                 HeaderName::from_bytes(name.as_bytes()),
-                HeaderValue::from_str(&val),
+                HeaderValue::from_str(&effective_val),
             ) {
                 hdrs.append(hn, hv);
             }
@@ -764,7 +906,12 @@ async fn proxy_to_tunnel(
         }
     }
 
-    let stream = ReceiverStream::new(body_rx);
+    let stream = CancelOnDropStream {
+        inner: ReceiverStream::new(body_rx),
+        session,
+        req_id,
+        completed: false,
+    };
     builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
     })
@@ -816,7 +963,6 @@ async fn proxy_ws_to_tunnel(
         return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
     }
 
-    // Confirm local upstream accepted the WebSocket before upgrading the public client
     match tokio::time::timeout(Duration::from_secs(10), opened_rx).await {
         Ok(Ok(opened)) if opened.accepted => {}
         Ok(Ok(opened)) => {

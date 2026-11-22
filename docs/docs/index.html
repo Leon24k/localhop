@@ -414,7 +414,7 @@
 
     <article class="doc" id="docContent">
       <div class="doc-header">
-        <div class="std-pill">Reference Manual &middot; Version 0.1.0</div>
+        <div class="std-pill">Reference Manual &middot; Version 0.2.0</div>
         <h1>localhop Technical Documentation</h1>
         <p class="lead">
           This manual explains how to install, configure, operate, and troubleshoot the localhop CLI client and the localhop relay server.
@@ -437,7 +437,7 @@
         </ul>
         <div class="callout callout-note">
           <span class="callout-title">Note</span>
-          <p>All examples in this manual assume <code>localhop</code> version <code>0.1.0</code>.</p>
+          <p>All examples in this manual assume <code>localhop</code> version <code>0.2.0</code>.</p>
         </div>
       </section>
 
@@ -591,8 +591,20 @@
               <tr>
                 <td><code>&lt;PORT&gt;</code></td>
                 <td>None</td>
-                <td>Required</td>
-                <td>Sets the local port that receives forwarded traffic.</td>
+                <td>Required*</td>
+                <td>Sets the local port that receives forwarded traffic. Omit when you pass <code>--config</code>.</td>
+              </tr>
+              <tr>
+                <td><code>-c, --config &lt;FILE&gt;</code></td>
+                <td>None</td>
+                <td>None</td>
+                <td>Loads a multi-tunnel TOML configuration file (for example, <code>localhop.toml</code>).</td>
+              </tr>
+              <tr>
+                <td><code>-H, --header &lt;K:V&gt;</code></td>
+                <td>None</td>
+                <td>None</td>
+                <td>Adds custom HTTP headers to forwarded local requests. Repeat this flag for multiple headers.</td>
               </tr>
               <tr>
                 <td><code>--host &lt;HOST&gt;</code></td>
@@ -721,6 +733,12 @@
                 <td><code>LOCALHOP_IDLE_TIMEOUT_SECS</code></td>
                 <td><code>45</code></td>
                 <td>Closes silent or dead tunnel connections after this timeout.</td>
+              </tr>
+              <tr>
+                <td><code>--rate-limit-rps &lt;N&gt;</code></td>
+                <td><code>LOCALHOP_RATE_LIMIT_RPS</code></td>
+                <td><code>0</code></td>
+                <td>Sets the per-IP HTTP rate limit in requests per second (<code>0</code> disables the limit).</td>
               </tr>
             </tbody>
           </table>
@@ -862,6 +880,7 @@ localhop 3000</code></pre>
               <tr><td><code>0x0D</code></td><td><code>WsOpened</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
               <tr><td><code>0x0E</code></td><td><code>WsMessage</code></td><td><code>[tag][req_id: 8B BE][is_bin: 1B][raw Bytes]</code></td><td>Bidirectional</td></tr>
               <tr><td><code>0x0F</code></td><td><code>WsClose</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Bidirectional</td></tr>
+              <tr><td><code>0x10</code></td><td><code>Cancel</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Relay &rarr; CLI</td></tr>
             </tbody>
           </table>
         </div>

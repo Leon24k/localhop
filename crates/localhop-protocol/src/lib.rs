@@ -23,6 +23,7 @@ pub mod tag {
     pub const WS_OPENED: u8 = 0x0D;
     pub const WS_MESSAGE: u8 = 0x0E;
     pub const WS_CLOSE: u8 = 0x0F;
+    pub const CANCEL: u8 = 0x10;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +115,10 @@ pub enum Frame {
     WsClose {
         req_id: u64,
     },
+    /// Sent by the relay when the public client disconnects before a stream completes.
+    Cancel {
+        req_id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -169,6 +174,7 @@ impl Frame {
                 payload,
             } => Ok(encode_ws_message(*req_id, *is_binary, payload)),
             Frame::WsClose { req_id } => Ok(encode_u64(tag::WS_CLOSE, *req_id)),
+            Frame::Cancel { req_id } => Ok(encode_u64(tag::CANCEL, *req_id)),
         }
     }
 
@@ -221,6 +227,9 @@ impl Frame {
                 })
             }
             tag::WS_CLOSE => Ok(Frame::WsClose {
+                req_id: decode_u64(&payload)?,
+            }),
+            tag::CANCEL => Ok(Frame::Cancel {
                 req_id: decode_u64(&payload)?,
             }),
             other => Err(CodecError::UnknownTag(other)),
@@ -429,6 +438,13 @@ mod tests {
         assert!(matches!(
             Frame::decode(close).unwrap(),
             Frame::WsClose { req_id: 99 }
+        ));
+
+        let cancel = Frame::Cancel { req_id: 77 }.encode().unwrap();
+        assert_eq!(cancel.len(), 9);
+        assert!(matches!(
+            Frame::decode(cancel).unwrap(),
+            Frame::Cancel { req_id: 77 }
         ));
     }
 

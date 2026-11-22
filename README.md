@@ -10,8 +10,8 @@
   </p>
 
   <p>
-    <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-2024%20Edition-f74c00?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024" /></a>
-    <a href="https://github.com/tokio-rs/axum"><img src="https://img.shields.io/badge/Axum-0.8-38bdf8?style=flat-square&logo=rust&logoColor=white" alt="Axum 0.8" /></a>
+    <a href="https://crates.io/crates/localhop"><img src="https://img.shields.io/crates/v/localhop?style=flat-square&logo=rust&color=f74c00" alt="crates.io" /></a>
+    <a href="https://www.npmjs.com/package/localhop"><img src="https://img.shields.io/npm/v/localhop?style=flat-square&logo=npm&color=cb3837" alt="npm" /></a>
     <a href="#benchmarks"><img src="https://img.shields.io/badge/CLI%20Binary-3.5%20MB-10b981?style=flat-square" alt="CLI Binary 3.5 MB" /></a>
     <a href="#benchmarks"><img src="https://img.shields.io/badge/Added%20p99-+0.52ms-6366f1?style=flat-square" alt="Added p99 +0.52ms" /></a>
     <a href="#benchmarks"><img src="https://img.shields.io/badge/Runtime-Zero%20GC-a855f7?style=flat-square" alt="Zero GC" /></a>
@@ -46,6 +46,18 @@ Most commercial tunnels enforce monthly request caps, browser interstitial warni
 - **Production-Hardened Out of the Box** — Constant-time auth token & `--basic-auth` edge checks, `X-Forwarded-*` proxy headers, configurable body & tunnel caps, zombie tunnel eviction, and localhost CSRF protection on the Inspector API.
 - **Flat Memory Under Load** — Lock-free routing (`DashMap`) + a bounded 200-request ring buffer keep RSS around **~4–7 MB** even after thousands of concurrent requests.
 - **$0 Self-Hostable Relay** — Speaks single-port HTTP + WebSocket so you can host your own private relay for free on **Render** (no VPS, no raw TCP/UDP port config, no browser warning page, no request caps).
+
+---
+
+## Live Inspector UI (`localhost:4040`)
+
+<div align="center">
+  <img src="./assets/inspector-preview.png" alt="localhop live HTTP and webhook inspector UI" width="100%" />
+</div>
+
+- Streams requests and WebSocket upgrades live over Server-Sent Events (SSE)
+- Automatically decompresses `gzip` and `deflate` response bodies for readable JSON previews
+- Supports 1-click **Replay**, **Edit & Replay**, **Copy as cURL**, and **Export / Import JSON fixtures** for offline webhook testing
 
 ---
 
@@ -181,17 +193,21 @@ Open **`http://127.0.0.1:4040`** in your browser to inspect every request live, 
 
 ## Deploy Your Own Relay for Free
 
-### Option 1: Render (Free Tier Blueprint — 1 Click)
+### Option 1: Render (Free Tier Blueprint, 1 Click)
 
-This repo includes [`render.yaml`](./render.yaml) and a multi-stage [`Dockerfile`](./Dockerfile):
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Leon24k/localhop)
 
-1. Open [Render](https://render.com) → **New → Blueprint**.
-2. Select your `localhop` repository and deploy on the **Free** plan.
+This repo includes [`render.yaml`](./render.yaml) (pre-configured with `LOCALHOP_RATE_LIMIT_RPS=100`) and a multi-stage [`Dockerfile`](./Dockerfile):
+
+1. Click **Deploy to Render** above (or open [Render](https://render.com) → **New → Blueprint**).
+2. Deploy on the **Free** plan and optionally set `LOCALHOP_AUTH_TOKEN` to lock your private relay.
 3. Point your CLI at your new relay:
    ```bash
    export LOCALHOP_SERVER=https://<your-service>.onrender.com
    localhop 3000
    ```
+
+> **Path vs. Subdomain Routing:** Path routing (`/t/<id>/...`) works with zero DNS setup and automatically rewrites relative `Location: /...` redirects. It is ideal for REST APIs and webhooks. For full frontend SPAs (Next.js, Vite) that serve root-absolute assets like `/_next/static/...`, enable wildcard subdomain routing (`LOCALHOP_BASE_DOMAIN`).
 
 ### Option 2: Docker (Any VPS / Fly / Railway / Homelab)
 
@@ -220,7 +236,9 @@ Tunnels will automatically be issued clean subdomain URLs like `https://myapp.ho
 
 | Flag / Arg | Env Var | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `<PORT>` | — | *(required)* | Local port to expose (e.g. `localhop 3000`) |
+| `<PORT>` | — | *(required unless `--config`)* | Local port to expose (e.g. `localhop 3000`) |
+| `-c, --config <FILE>` | — | none | Load a multi-tunnel TOML file (see [`localhop.toml.example`](./localhop.toml.example)) |
+| `-H, --header <K:V>` | — | none | Inject custom headers into forwarded requests (repeatable) |
 | `--host <HOST>` | — | `127.0.0.1` | Local host to forward requests to |
 | `--server <URL>` | `LOCALHOP_SERVER` | `ws://127.0.0.1:8080` | Public relay URL (`http`/`https`/`ws`/`wss`) |
 | `-s, --id <ID>` | — | random 8-char | Request a custom tunnel ID / subdomain (`3–32` chars) |
@@ -244,6 +262,7 @@ Tunnels will automatically be issued clean subdomain URLs like `https://myapp.ho
 | `--max-tunnels <N>` | `LOCALHOP_MAX_TUNNELS` | `1000` | Maximum simultaneous active tunnels |
 | `--max-body-bytes <B>` | `LOCALHOP_MAX_BODY_BYTES` | `52428800` | Maximum HTTP request body size (`50 MiB` default) |
 | `--idle-timeout-secs <S>` | `LOCALHOP_IDLE_TIMEOUT_SECS` | `45` | Evict dead/zombie tunnels after idle timeout |
+| `--rate-limit-rps <N>` | `LOCALHOP_RATE_LIMIT_RPS` | `0` | Per-IP HTTP rate limit in requests/sec (`0` = unlimited) |
 
 ---
 
@@ -271,31 +290,30 @@ localhop/
 └── render.yaml                # Render free-tier Blueprint config
 ```
 
-## Publishing a Release
+## Automated Release Pipeline
 
-1. **Tag & push** to trigger `.github/workflows/release.yml` (builds macOS arm64/x64, Linux x64/arm64, and Windows x64 archives + `SHA256SUMS.txt`):
+1. **Bump version and verify all checks locally:**
    ```bash
-   git tag v0.1.0 && git push origin v0.1.0
+   ./scripts/release.sh 0.2.0
    ```
-2. **Publish to crates.io** (in dependency order):
+2. **Tag and push** to trigger `.github/workflows/release.yml`:
    ```bash
-   cargo login
-   cargo publish -p localhop-protocol
-   cargo publish -p localhop
-   cargo publish -p localhop-server
+   git tag -a v0.2.0 -m "Release v0.2.0" && git push origin main v0.2.0
    ```
-3. **Publish to npm** (after the GitHub Release `v0.1.0` assets finish uploading):
-   ```bash
-   cd npm/localhop && npm login && npm publish
-   ```
+   The workflow automatically:
+   - Builds stripped binaries for macOS (arm64 & x64), Linux (x64 & arm64), and Windows (x64)
+   - Generates `SHA256SUMS.txt` and a ready-to-use Homebrew formula (`localhop.rb`) attached to the GitHub Release
+   - Publishes all three crates to **crates.io** if `CARGO_REGISTRY_TOKEN` is set in GitHub Repository Secrets
+   - Publishes the wrapper to **npm** if `NPM_TOKEN` is set in GitHub Repository Secrets
 
 ## Roadmap
 
 - [x] Full **WebSocket passthrough** for proxied local apps (Vite HMR, Next.js Fast Refresh, Socket.IO)
-- [x] **Offline webhook fixtures** — export/import captured requests as JSON and replay without an active tunnel
-- [x] Edge **HTTP Basic Auth** (`--basic-auth`), body/tunnel DoS caps, and idle zombie tunnel eviction
+- [x] **Offline webhook fixtures** & automatic **`gzip`/`deflate` body decoding** in the Live Inspector
+- [x] Edge **HTTP Basic Auth**, **per-IP rate limiting**, **stream cancellation (`Frame::Cancel`)**, and **multi-tunnel `localhop.toml`**
+- [x] Automated **GitHub Release**, **Homebrew formula**, **crates.io**, and **npm** tag pipeline
 - [ ] Optional **QUIC (`quinn`)** transport (`--quic`) for 0-RTT UDP tunneling on VPS hosts
-- [ ] Optional **Ed25519 keypair auth** & multi-tunnel config file (`localhop.toml`)
+- [ ] Optional **Ed25519 keypair auth**
 
 ## Security & Contributing
 

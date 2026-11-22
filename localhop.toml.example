@@ -1,0 +1,14 @@
+# Example multi-tunnel configuration for `localhop --config localhop.toml`
+server = "https://your-relay.onrender.com"
+# token = "optional-relay-auth-token"
+inspector_port = 4040
+
+[[tunnels]]
+port = 3000
+id = "web"
+
+[[tunnels]]
+port = 8080
+id = "api"
+basic_auth = "dev:secret"
+headers = ["X-Forwarded-Env: preview"]

@@ -56,6 +56,15 @@ async fn spawn_upstream() -> SocketAddr {
             get(|| async { (StatusCode::OK, "world-from-local") }),
         )
         .route(
+            "/redirect",
+            get(|| async {
+                (
+                    StatusCode::FOUND,
+                    [(http::header::LOCATION, "/dashboard?tab=1")],
+                )
+            }),
+        )
+        .route(
             "/ws",
             get(|ws: WebSocketUpgrade| async move {
                 ws.on_upgrade(|mut socket| async move {
@@ -155,6 +164,15 @@ async fn connect_agent(
                             let req = builder.body(Full::new(Bytes::from(body))).unwrap();
                             let resp = client.request(req).await.unwrap();
                             let status = resp.status().as_u16();
+                            let resp_headers: Vec<(String, String)> = resp
+                                .headers()
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    v.to_str()
+                                        .ok()
+                                        .map(|val| (k.as_str().to_string(), val.to_string()))
+                                })
+                                .collect();
                             let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
 
                             out_tx
@@ -162,7 +180,7 @@ async fn connect_agent(
                                     Frame::ResponseHead(ResponseHead {
                                         req_id,
                                         status,
-                                        headers: vec![],
+                                        headers: resp_headers,
                                         local_latency_us: 100,
                                     })
                                     .encode()
@@ -551,4 +569,152 @@ async fn rejects_oversized_request_body() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
     agent.abort();
+}
+
+#[tokio::test]
+async fn rewrites_relative_location_in_path_mode_and_enforces_rate_limit() {
+    let upstream = spawn_upstream().await;
+    let cfg = Config {
+        rate_limit_rps: 2, // burst = 4
+        ..Config::default()
+    };
+    let (relay, _state) = spawn_relay(cfg).await;
+
+    let (_url, agent) = connect_agent(
+        relay,
+        upstream,
+        Hello {
+            requested_id: Some("redir".into()),
+            token: None,
+            basic_auth: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let client = http_client();
+
+    // 1. Verify relative Location header gets prefixed with /t/redir
+    let req = Request::builder()
+        .uri(format!("http://{relay}/t/redir/redirect"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = client.request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        resp.headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/t/redir/dashboard?tab=1")
+    );
+
+    // 2. Burst past rate limit -> expect 429 Too Many Requests
+    let mut saw_429 = false;
+    for _ in 0..10 {
+        let req = Request::builder()
+            .uri(format!("http://{relay}/t/redir/hello"))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = client.request(req).await.unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(
+                resp.headers()
+                    .get(http::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "expected 429 Too Many Requests when exceeding rate_limit_rps"
+    );
+
+    agent.abort();
+}
+
+#[tokio::test]
+async fn emits_cancel_frame_when_public_client_drops_stream_early() {
+    let (relay, _state) = spawn_relay(Config::default()).await;
+    let ws_url = format!("ws://{relay}/_localhop/ws");
+    let (ws_stream, _) = connect_async(&ws_url).await.unwrap();
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    ws_tx
+        .send(TungMsg::Binary(
+            Frame::Hello(Hello {
+                requested_id: Some("canceltest".into()),
+                token: None,
+                basic_auth: None,
+            })
+            .encode()
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    // Read Welcome
+    let _ = ws_rx.next().await.unwrap().unwrap();
+
+    // Start a public HTTP request and drop the response body early
+    let public_task = tokio::spawn(async move {
+        let client = http_client();
+        let req = Request::builder()
+            .uri(format!("http://{relay}/t/canceltest/stream"))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = client.request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drop `resp` without consuming the unfinished body!
+        drop(resp);
+    });
+
+    // Agent receives RequestHead, responds with ResponseHead + 1 chunk (no ResponseEnd)
+    let mut got_req_id = None;
+    let mut got_cancel = false;
+    while let Some(Ok(TungMsg::Binary(raw))) = ws_rx.next().await {
+        match Frame::decode(raw).unwrap() {
+            Frame::RequestHead(head) => {
+                got_req_id = Some(head.req_id);
+                ws_tx
+                    .send(TungMsg::Binary(
+                        Frame::ResponseHead(ResponseHead {
+                            req_id: head.req_id,
+                            status: 200,
+                            headers: vec![("content-type".into(), "text/event-stream".into())],
+                            local_latency_us: 10,
+                        })
+                        .encode()
+                        .unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+                ws_tx
+                    .send(TungMsg::Binary(
+                        Frame::ResponseBody {
+                            req_id: head.req_id,
+                            chunk: Bytes::from_static(b"data: chunk1\n\n"),
+                        }
+                        .encode()
+                        .unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            Frame::Cancel { req_id } => {
+                assert_eq!(Some(req_id), got_req_id);
+                got_cancel = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    public_task.await.unwrap();
+    assert!(
+        got_cancel,
+        "expected Frame::Cancel when client dropped stream early"
+    );
 }

@@ -1,6 +1,6 @@
 {
   "name": "localhop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Seamless, ultra-low-latency Rust localhost tunnel with built-in live HTTP/webhook inspector & replay",
   "license": "MIT",
   "keywords": [
@@ -15,10 +15,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Leon24k/localhop.git",
+    "url": "git+https://github.com/Leon24k/localhop.git",
     "directory": "npm/localhop"
   },
-  "homepage": "https://github.com/Leon24k/localhop#readme",
+  "homepage": "https://leon24k.github.io/localhop/",
   "bugs": {
     "url": "https://github.com/Leon24k/localhop/issues"
   },

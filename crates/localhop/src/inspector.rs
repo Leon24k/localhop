@@ -9,11 +9,13 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     convert::Infallible,
+    io::Read,
     net::SocketAddr,
     sync::{
         Arc,
@@ -155,9 +157,48 @@ pub fn now_millis() -> u64 {
 }
 
 pub fn format_body_preview(buf: &[u8], total_len: usize) -> String {
+    format_body_preview_with_encoding(buf, total_len, None)
+}
+
+/// Formats a captured payload preview, automatically decompressing `gzip` or
+/// `deflate` bodies (bounded by `MAX_PREVIEW_BYTES`) so compressed API JSON
+/// renders cleanly in the Live Inspector.
+pub fn format_body_preview_with_encoding(
+    buf: &[u8],
+    total_len: usize,
+    content_encoding: Option<&str>,
+) -> String {
     if buf.is_empty() {
         return String::new();
     }
+
+    if let Some(enc) = content_encoding {
+        let lower = enc.to_ascii_lowercase();
+        let decoded = if lower.contains("gzip") {
+            let mut out = Vec::new();
+            GzDecoder::new(buf)
+                .take(MAX_PREVIEW_BYTES as u64)
+                .read_to_end(&mut out)
+                .ok()
+                .map(|_| out)
+        } else if lower.contains("deflate") {
+            let mut out = Vec::new();
+            DeflateDecoder::new(buf)
+                .take(MAX_PREVIEW_BYTES as u64)
+                .read_to_end(&mut out)
+                .ok()
+                .map(|_| out)
+        } else {
+            None
+        };
+
+        if let Some(plain) = decoded
+            && let Ok(text) = std::str::from_utf8(&plain)
+        {
+            return text.to_string();
+        }
+    }
+
     let suffix = if total_len > buf.len() {
         format!(
             "\n… [truncated, showing {} of {} bytes]",
@@ -170,6 +211,24 @@ pub fn format_body_preview(buf: &[u8], total_len: usize) -> String {
     match std::str::from_utf8(buf) {
         Ok(s) => format!("{s}{suffix}"),
         Err(_) => format!("<binary payload: {total_len} bytes>"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+
+    #[test]
+    fn decompresses_gzip_preview() {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(br#"{"ok":true,"compressed":"gzip"}"#)
+            .unwrap();
+        let gz = enc.finish().unwrap();
+
+        let rendered = format_body_preview_with_encoding(&gz, gz.len(), Some("gzip"));
+        assert_eq!(rendered, r#"{"ok":true,"compressed":"gzip"}"#);
     }
 }
 

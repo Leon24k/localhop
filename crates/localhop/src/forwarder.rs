@@ -21,7 +21,8 @@ use tokio_tungstenite::{
 };
 
 use crate::inspector::{
-    InspectorHub, MAX_PREVIEW_BYTES, TrafficRecord, format_body_preview, now_millis,
+    InspectorHub, MAX_PREVIEW_BYTES, TrafficRecord, format_body_preview,
+    format_body_preview_with_encoding, now_millis,
 };
 
 type StreamingBody = StreamBody<ReceiverStream<Result<HyperFrame<Bytes>, Infallible>>>;
@@ -31,12 +32,19 @@ pub struct LocalForwarder {
     port: u16,
     preserve_host: bool,
     quiet: bool,
+    custom_headers: Vec<(String, String)>,
     stream_client: Client<HttpConnector, StreamingBody>,
     replay_client: Client<HttpConnector, Full<Bytes>>,
 }
 
 impl LocalForwarder {
-    pub fn new(host: String, port: u16, preserve_host: bool, quiet: bool) -> Arc<Self> {
+    pub fn new(
+        host: String,
+        port: u16,
+        preserve_host: bool,
+        quiet: bool,
+        custom_headers: Vec<(String, String)>,
+    ) -> Arc<Self> {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
@@ -54,6 +62,7 @@ impl LocalForwarder {
             port,
             preserve_host,
             quiet,
+            custom_headers,
             stream_client,
             replay_client,
         })
@@ -117,6 +126,14 @@ impl LocalForwarder {
                 && let Ok(hv) = HeaderValue::from_str(&format!("{}:{}", self.host, self.port))
             {
                 hdrs.insert(http::header::HOST, hv);
+            }
+            for (k, v) in &self.custom_headers {
+                if let (Ok(hn), Ok(hv)) = (
+                    HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    hdrs.insert(hn, hv);
+                }
             }
         }
 
@@ -201,18 +218,36 @@ impl LocalForwarder {
                     );
                 }
 
+                let resp_encoding = resp_headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                    .map(|(_, v)| v.as_str());
+                let req_encoding = head
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                    .map(|(_, v)| v.as_str());
+
                 hub.push_record(TrafficRecord {
                     id: record_id,
                     timestamp_ms: now_millis(),
                     source: "tunnel".to_string(),
                     method: head.method,
                     path_and_query: head.path_and_query,
-                    request_headers: head.headers,
-                    request_body: format_body_preview(&req_preview, req_bytes),
+                    request_headers: head.headers.clone(),
+                    request_body: format_body_preview_with_encoding(
+                        &req_preview,
+                        req_bytes,
+                        req_encoding,
+                    ),
                     request_bytes: req_bytes,
                     status,
-                    response_headers: resp_headers,
-                    response_body: format_body_preview(&resp_preview, resp_bytes),
+                    response_headers: resp_headers.clone(),
+                    response_body: format_body_preview_with_encoding(
+                        &resp_preview,
+                        resp_bytes,
+                        resp_encoding,
+                    ),
                     response_bytes: resp_bytes,
                     local_latency_us,
                     error: None,

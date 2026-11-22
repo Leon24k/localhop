@@ -7,18 +7,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Leon24k/localhop"
 readme = "README.md"
 
 [workspace.dependencies]
-localhop-protocol = { version = "0.1.0", path = "crates/localhop-protocol" }
+localhop-protocol = { version = "0.2.0", path = "crates/localhop-protocol" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6"
+flate2 = "1"
 futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
@@ -30,6 +31,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

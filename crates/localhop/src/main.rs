@@ -1,3 +1,4 @@
+mod config;
 mod forwarder;
 mod inspector;
 
@@ -7,13 +8,15 @@ use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use localhop_protocol::{Frame, Hello};
 use std::{
+    path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::AbortHandle};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
+    config::{TunnelSpec, load_config, parse_header_arg},
     forwarder::LocalForwarder,
     inspector::{InspectorHub, start_inspector_server},
 };
@@ -25,8 +28,12 @@ use crate::{
     about = "Seamless, ultra-low-latency Rust localhost tunnel with live HTTP/webhook inspector & replay"
 )]
 struct Cli {
-    /// Local port to expose (e.g. `localhop 3000`)
-    port: u16,
+    /// Local port to expose (e.g. `localhop 3000`). Omit when using `--config`.
+    port: Option<u16>,
+
+    /// Path to a multi-tunnel TOML configuration file (e.g. `--config localhop.toml`)
+    #[arg(short = 'c', long)]
+    config: Option<PathBuf>,
 
     /// Local host to forward requests to
     #[arg(long, default_value = "127.0.0.1")]
@@ -47,6 +54,10 @@ struct Cli {
     /// Protect the public tunnel URL with HTTP Basic Auth (`user:pass`)
     #[arg(long, env = "LOCALHOP_BASIC_AUTH")]
     basic_auth: Option<String>,
+
+    /// Inject custom HTTP headers into forwarded requests (repeatable: `-H "X-Env: preview"`)
+    #[arg(short = 'H', long = "header")]
+    headers: Vec<String>,
 
     /// Preserve incoming Host header instead of rewriting to `<host>:<port>`
     #[arg(long, default_value_t = false)]
@@ -81,26 +92,96 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
-    if let Some(ref creds) = cli.basic_auth
-        && !creds.contains(':')
+
+    let (server_raw, token, inspector_port, no_inspector, quiet, tunnels) = if let Some(
+        ref cfg_path,
+    ) = cli.config
     {
-        eprintln!("\x1b[31merror:\x1b[0m --basic-auth must be in `user:pass` format");
-        std::process::exit(2);
+        let cfg = match load_config(cfg_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("\x1b[31merror:\x1b[0m {e}");
+                std::process::exit(2);
+            }
+        };
+        (
+            cfg.server.unwrap_or(cli.server.clone()),
+            cfg.token.or(cli.token.clone()),
+            cfg.inspector_port.unwrap_or(cli.inspector_port),
+            cfg.no_inspector || cli.no_inspector,
+            cfg.quiet || cli.quiet,
+            cfg.tunnels,
+        )
+    } else {
+        let Some(port) = cli.port else {
+            eprintln!(
+                "\x1b[31merror:\x1b[0m provide a local port (e.g. `localhop 3000`) or `--config localhop.toml`"
+            );
+            std::process::exit(2);
+        };
+        let spec = TunnelSpec {
+            port,
+            host: cli.host.clone(),
+            id: cli.tunnel_id.clone(),
+            basic_auth: cli.basic_auth.clone(),
+            preserve_host: cli.preserve_host,
+            headers: cli.headers.clone(),
+        };
+        (
+            cli.server.clone(),
+            cli.token.clone(),
+            cli.inspector_port,
+            cli.no_inspector,
+            cli.quiet,
+            vec![spec],
+        )
+    };
+
+    let mut prepared = Vec::with_capacity(tunnels.len());
+    for spec in tunnels {
+        if let Some(ref creds) = spec.basic_auth
+            && !creds.contains(':')
+        {
+            eprintln!("\x1b[31merror:\x1b[0m basic_auth must be in `user:pass` format");
+            std::process::exit(2);
+        }
+        let mut parsed_headers = Vec::with_capacity(spec.headers.len());
+        for raw in &spec.headers {
+            match parse_header_arg(raw) {
+                Ok(pair) => parsed_headers.push(pair),
+                Err(e) => {
+                    eprintln!("\x1b[31merror:\x1b[0m {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let forwarder = LocalForwarder::new(
+            spec.host.clone(),
+            spec.port,
+            spec.preserve_host,
+            quiet,
+            parsed_headers,
+        );
+        prepared.push((spec, forwarder));
     }
 
-    let ws_url = normalize_ws_url(&cli.server);
-    let forwarder = LocalForwarder::new(cli.host.clone(), cli.port, cli.preserve_host, cli.quiet);
-    let hub = InspectorHub::new(forwarder.target_display(), ws_url.clone());
+    let ws_url = normalize_ws_url(&server_raw);
+    let primary_forwarder = prepared[0].1.clone();
+    let target_summary = if prepared.len() == 1 {
+        primary_forwarder.target_display()
+    } else {
+        format!("{} local targets", prepared.len())
+    };
+    let hub = InspectorHub::new(target_summary.clone(), ws_url.clone());
 
-    let inspector_url = if cli.no_inspector {
+    let inspector_url = if no_inspector {
         None
     } else {
-        match start_inspector_server(cli.inspector_port, hub.clone(), forwarder.clone()).await {
+        match start_inspector_server(inspector_port, hub.clone(), primary_forwarder).await {
             Ok(addr) => Some(format!("http://{addr}")),
             Err(e) => {
                 eprintln!(
-                    "\x1b[33mwarn:\x1b[0m could not bind inspector on port {}: {e}",
-                    cli.inspector_port
+                    "\x1b[33mwarn:\x1b[0m could not bind inspector on port {inspector_port}: {e}"
                 );
                 None
             }
@@ -110,60 +191,83 @@ async fn main() {
     println!();
     println!("  \x1b[1;36mlocalhop\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
     println!("  \x1b[90m────────────────────────────────────────────────────────\x1b[0m");
-    println!("  Forwarding   ->  {}", forwarder.target_display());
+    for (spec, fwd) in &prepared {
+        let auth_note = if spec.basic_auth.is_some() {
+            " \x1b[33m[basic-auth]\x1b[0m"
+        } else {
+            ""
+        };
+        println!("  Forwarding   ->  {}{auth_note}", fwd.target_display());
+    }
     if let Some(url) = &inspector_url {
         println!("  Inspector    ->  \x1b[36m{url}\x1b[0m");
-    }
-    if cli.basic_auth.is_some() {
-        println!("  Basic Auth   ->  \x1b[33menabled\x1b[0m");
     }
     println!("  Relay        ->  {ws_url}");
     println!();
 
+    let mut handles = Vec::with_capacity(prepared.len());
+    for (spec, forwarder) in prepared {
+        let ws_url = ws_url.clone();
+        let token = token.clone();
+        let hub = hub.clone();
+        handles.push(tokio::spawn(async move {
+            run_reconnect_loop(ws_url, spec.id, token, spec.basic_auth, forwarder, hub).await;
+        }));
+    }
+
+    let _ = tokio::signal::ctrl_c().await;
+    println!("\n  \x1b[90mShutting down localhop…\x1b[0m");
+    for h in handles {
+        h.abort();
+    }
+}
+
+async fn run_reconnect_loop(
+    ws_url: String,
+    tunnel_id: Option<String>,
+    token: Option<String>,
+    basic_auth: Option<String>,
+    forwarder: Arc<LocalForwarder>,
+    hub: Arc<InspectorHub>,
+) {
     let base_backoff = Duration::from_millis(400);
     let mut backoff = base_backoff;
 
     loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n  \x1b[90mShutting down localhop…\x1b[0m");
-                break;
+        let outcome = run_session(
+            &ws_url,
+            tunnel_id.clone(),
+            token.clone(),
+            basic_auth.clone(),
+            forwarder.clone(),
+            hub.clone(),
+        )
+        .await;
+        hub.set_connected(false, None).await;
+        match outcome {
+            SessionEnd::Fatal(err) => {
+                eprintln!("  \x1b[31m! Fatal error:\x1b[0m {err}");
+                std::process::exit(1);
             }
-            outcome = run_session(
-                &ws_url,
-                cli.tunnel_id.clone(),
-                cli.token.clone(),
-                cli.basic_auth.clone(),
-                forwarder.clone(),
-                hub.clone(),
-            ) => {
-                hub.set_connected(false, None).await;
-                match outcome {
-                    SessionEnd::Fatal(err) => {
-                        eprintln!("  \x1b[31m! Fatal error:\x1b[0m {err}");
-                        std::process::exit(1);
-                    }
-                    SessionEnd::Disconnected { was_connected } => {
-                        if was_connected {
-                            backoff = base_backoff;
-                        }
-                        println!("  \x1b[33m! Relay disconnected. Reconnecting in {}ms…\x1b[0m", backoff.as_millis());
-                    }
-                    SessionEnd::Transient { err, was_connected } => {
-                        if was_connected {
-                            backoff = base_backoff;
-                        }
-                        eprintln!("  \x1b[31m! Connection error:\x1b[0m {err}");
-                        println!("  \x1b[90m  Retrying in {}ms…\x1b[0m", backoff.as_millis());
-                    }
+            SessionEnd::Disconnected { was_connected } => {
+                if was_connected {
+                    backoff = base_backoff;
                 }
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
-                    _ = tokio::time::sleep(backoff) => {}
+                println!(
+                    "  \x1b[33m! Relay disconnected. Reconnecting in {}ms…\x1b[0m",
+                    backoff.as_millis()
+                );
+            }
+            SessionEnd::Transient { err, was_connected } => {
+                if was_connected {
+                    backoff = base_backoff;
                 }
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                eprintln!("  \x1b[31m! Connection error:\x1b[0m {err}");
+                println!("  \x1b[90m  Retrying in {}ms…\x1b[0m", backoff.as_millis());
             }
         }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(10));
     }
 }
 
@@ -263,13 +367,15 @@ async fn run_session(
         .await;
 
     println!(
-        "  \x1b[1;32m● LIVE\x1b[0m  Public URL  ->  \x1b[1;32m{}\x1b[0m",
+        "  \x1b[1;32m● LIVE\x1b[0m  {}  ->  \x1b[1;32m{}\x1b[0m",
+        forwarder.target_display(),
         welcome.public_url
     );
     println!("  \x1b[90m────────────────────────────────────────────────────────\x1b[0m");
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(512);
     let in_flight_http: Arc<DashMap<u64, mpsc::Sender<Bytes>>> = Arc::new(DashMap::new());
+    let in_flight_http_tasks: Arc<DashMap<u64, AbortHandle>> = Arc::new(DashMap::new());
     let in_flight_ws: Arc<DashMap<u64, mpsc::Sender<(bool, Bytes)>>> = Arc::new(DashMap::new());
 
     let writer = tokio::spawn(async move {
@@ -280,7 +386,6 @@ async fn run_session(
         }
     });
 
-    // Periodic RTT Ping task (also keeps the tunnel alive past idle timeout)
     let ping_tx = outbound_tx.clone();
     let pinger = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -306,12 +411,15 @@ async fn run_session(
                     let fwd = forwarder.clone();
                     let out = outbound_tx.clone();
                     let hub_clone = hub.clone();
-                    let map = in_flight_http.clone();
-                    tokio::spawn(async move {
+                    let body_map = in_flight_http.clone();
+                    let task_map = in_flight_http_tasks.clone();
+                    let handle = tokio::spawn(async move {
                         fwd.forward_tunnel_request(head, body_rx, out, hub_clone)
                             .await;
-                        map.remove(&req_id);
+                        body_map.remove(&req_id);
+                        task_map.remove(&req_id);
                     });
+                    in_flight_http_tasks.insert(req_id, handle.abort_handle());
                 }
                 Ok(Frame::RequestBody { req_id, chunk }) => {
                     let tx = in_flight_http.get(&req_id).map(|e| e.value().clone());
@@ -321,6 +429,12 @@ async fn run_session(
                 }
                 Ok(Frame::RequestEnd { req_id }) => {
                     in_flight_http.remove(&req_id);
+                }
+                Ok(Frame::Cancel { req_id }) => {
+                    in_flight_http.remove(&req_id);
+                    if let Some((_, abort_handle)) = in_flight_http_tasks.remove(&req_id) {
+                        abort_handle.abort();
+                    }
                 }
                 Ok(Frame::WsOpen(open)) => {
                     let req_id = open.req_id;
