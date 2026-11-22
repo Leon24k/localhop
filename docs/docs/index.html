@@ -1,0 +1,1002 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Documentation | localhop (ASD-STE100)</title>
+  <meta name="description" content="Official technical documentation for localhop, written in ASD-STE100 Simplified Technical English." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1120'/%3E%3Ccircle cx='18' cy='44' r='6' fill='%2334d399'/%3E%3Ccircle cx='46' cy='24' r='6' fill='%2338bdf8'/%3E%3Cpath d='M21 38 C24 18, 38 14, 43 21' stroke='%2338bdf8' stroke-width='4' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #070a10;
+      --bg-elev: #0d121d;
+      --bg-card: #101726;
+      --bg-code: #090d16;
+      --border: rgba(148, 163, 184, 0.14);
+      --border-strong: rgba(56, 189, 248, 0.35);
+      --text: #f1f5f9;
+      --text-soft: #94a3b8;
+      --text-muted: #64748b;
+      --cyan: #38bdf8;
+      --emerald: #34d399;
+      --indigo: #818cf8;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Top Nav */
+    header.topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      height: 60px;
+      background: rgba(7, 10, 16, 0.86);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar-inner {
+      max-width: 1280px;
+      height: 100%;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 800;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+    .brand:hover { text-decoration: none; }
+    .brand .accent {
+      background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .brand-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      color: #a7f3d0;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    .top-links {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 13.5px;
+    }
+    .top-links a { color: var(--text-soft); }
+    .top-links a:hover { color: var(--text); text-decoration: none; }
+    .top-links a.active { color: var(--cyan); font-weight: 600; }
+    .menu-btn {
+      display: none;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    /* Layout */
+    .shell {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 270px minmax(0, 1fr);
+      gap: 36px;
+      padding: 28px 24px 72px;
+    }
+
+    /* Sidebar */
+    aside.sidebar {
+      position: sticky;
+      top: 84px;
+      align-self: start;
+      max-height: calc(100vh - 104px);
+      overflow-y: auto;
+      padding-right: 8px;
+    }
+    .search-input {
+      width: 100%;
+      padding: 9px 12px;
+      margin-bottom: 18px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+    .search-input:focus {
+      outline: none;
+      border-color: var(--cyan);
+    }
+    .nav-group { margin-bottom: 18px; }
+    .nav-group-title {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin: 0 0 8px 10px;
+    }
+    .side-link {
+      display: block;
+      padding: 6px 10px;
+      border-radius: 7px;
+      font-size: 13.5px;
+      color: var(--text-soft);
+      border-left: 2px solid transparent;
+    }
+    .side-link:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      text-decoration: none;
+    }
+    .side-link.active {
+      color: var(--cyan);
+      background: rgba(56, 189, 248, 0.1);
+      border-left-color: var(--cyan);
+      font-weight: 600;
+    }
+
+    @media (max-width: 900px) {
+      .menu-btn { display: inline-block; }
+      .shell { grid-template-columns: 1fr; padding-top: 20px; }
+      aside.sidebar {
+        display: none;
+        position: static;
+        max-height: none;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        margin-bottom: 12px;
+      }
+      aside.sidebar.open { display: block; }
+    }
+
+    /* Main Content */
+    article.doc { max-width: 840px; }
+    .doc-header {
+      padding-bottom: 24px;
+      margin-bottom: 32px;
+      border-bottom: 1px solid var(--border);
+    }
+    .std-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--cyan);
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 4px 10px;
+      border-radius: 6px;
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(30px, 4vw, 40px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+    }
+    .lead {
+      margin: 0;
+      font-size: 16px;
+      color: var(--text-soft);
+    }
+
+    section.doc-sec {
+      margin-bottom: 48px;
+      scroll-margin-top: 84px;
+    }
+    h2 {
+      margin: 0 0 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    h3 {
+      margin: 22px 0 10px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    p { margin: 0 0 14px; color: #cbd5e1; font-size: 14.8px; }
+    ul, ol { margin: 0 0 16px; padding-left: 22px; color: #cbd5e1; font-size: 14.8px; }
+    li { margin-bottom: 7px; }
+
+    code {
+      font-family: var(--mono);
+      font-size: 0.88em;
+      color: #bae6fd;
+      background: rgba(56, 189, 248, 0.09);
+      padding: 2px 6px;
+      border-radius: 5px;
+    }
+
+    /* Code blocks with copy button */
+    .code-wrap {
+      position: relative;
+      margin: 12px 0 18px;
+    }
+    pre {
+      margin: 0;
+      padding: 14px 56px 14px 16px;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-family: var(--mono);
+      font-size: 13px;
+      color: #e2e8f0;
+      overflow-x: auto;
+      line-height: 1.6;
+    }
+    pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+    .copy-code {
+      position: absolute;
+      top: 9px;
+      right: 9px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text-soft);
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .copy-code:hover { color: var(--text); border-color: var(--border-strong); }
+
+    /* ASD-STE100 Callouts: CAUTION and NOTE */
+    .callout {
+      margin: 16px 0 20px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .callout-title {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      display: block;
+    }
+    .callout p:last-child { margin-bottom: 0; }
+    .callout-caution {
+      background: rgba(251, 191, 36, 0.07);
+      border-color: rgba(251, 191, 36, 0.35);
+    }
+    .callout-caution .callout-title { color: var(--amber); }
+    .callout-note {
+      background: rgba(56, 189, 248, 0.07);
+      border-color: rgba(56, 189, 248, 0.3);
+    }
+    .callout-note .callout-title { color: var(--cyan); }
+
+    /* Tables */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 14px 0 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+      min-width: 560px;
+    }
+    th, td {
+      padding: 11px 14px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: none; }
+    thead th {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    /* Footer */
+    .doc-footer {
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div style="display:flex;align-items:center;gap:10px">
+        <a href="../" class="brand">
+          <svg width="26" height="26" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <rect width="64" height="64" rx="15" fill="#0f172a" stroke="#38bdf8" stroke-width="2.5"/>
+            <circle cx="19" cy="43" r="6" fill="#34d399"/>
+            <circle cx="45" cy="23" r="6" fill="#38bdf8"/>
+            <path d="M22 37 C25 18, 37 14, 42 20" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+          </svg>
+          <span>local<span class="accent">hop</span></span>
+        </a>
+        <span class="brand-tag">ASD-STE100</span>
+      </div>
+
+      <div class="top-links">
+        <a href="../">Home</a>
+        <a href="./" class="active">Documentation</a>
+        <a href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">GitHub</a>
+        <button class="menu-btn" id="menuBtn" type="button">Sections</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <input id="docSearch" class="search-input" type="search" placeholder="Filter sections..." aria-label="Filter documentation sections" />
+
+      <div class="nav-group">
+        <div class="nav-group-title">Getting Started</div>
+        <a class="side-link active" href="#overview">1. Overview</a>
+        <a class="side-link" href="#requirements">2. System Requirements</a>
+        <a class="side-link" href="#installation">3. Installation</a>
+        <a class="side-link" href="#quickstart">4. Quick Start Procedure</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title">Reference</div>
+        <a class="side-link" href="#cli-reference">5. CLI Reference</a>
+        <a class="side-link" href="#server-reference">6. Relay Server Reference</a>
+        <a class="side-link" href="#inspector">7. Live HTTP Inspector</a>
+        <a class="side-link" href="#websockets">8. WebSocket Passthrough</a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-title">Operations</div>
+        <a class="side-link" href="#deployment">9. Relay Deployment</a>
+        <a class="side-link" href="#protocol">10. Binary Protocol</a>
+        <a class="side-link" href="#security">11. Security Controls</a>
+        <a class="side-link" href="#troubleshooting">12. Troubleshooting</a>
+      </div>
+    </aside>
+
+    <article class="doc" id="docContent">
+      <div class="doc-header">
+        <div class="std-pill">Standard: ASD-STE100 Simplified Technical English &middot; Version 0.1.0</div>
+        <h1>localhop Technical Documentation</h1>
+        <p class="lead">
+          This manual explains how to install, configure, operate, and troubleshoot the localhop CLI client and the localhop relay server.
+        </p>
+      </div>
+
+      <!-- 1. Overview -->
+      <section class="doc-sec" id="overview">
+        <h2>1. Overview</h2>
+        <p>
+          localhop exposes a local HTTP or WebSocket server to the public internet. The system uses Rust binaries with no garbage collector.
+        </p>
+        <p>
+          The system has three components:
+        </p>
+        <ul>
+          <li><strong>localhop-server:</strong> A public Axum relay server that receives internet requests and sends them through an open tunnel.</li>
+          <li><strong>localhop:</strong> A local CLI client that opens one persistent WebSocket tunnel to the relay server and forwards traffic to localhost.</li>
+          <li><strong>Live Inspector:</strong> A local web interface on port <code>4040</code> that shows live HTTP traffic and replays saved requests.</li>
+        </ul>
+        <div class="callout callout-note">
+          <span class="callout-title">Note</span>
+          <p>This manual follows ASD-STE100 rules. Every procedure uses active voice, imperative verbs, and short sentences for clear reading.</p>
+        </div>
+      </section>
+
+      <!-- 2. System Requirements -->
+      <section class="doc-sec" id="requirements">
+        <h2>2. System Requirements</h2>
+        <p>Make sure your host meets these requirements before you install localhop:</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Supported Systems</th>
+                <th>Minimum Requirement</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Prebuilt CLI Binary</td>
+                <td>macOS (arm64, x86_64), Linux (x86_64, arm64), Windows (x86_64)</td>
+                <td>10 MB free RAM, 5 MB disk space</td>
+              </tr>
+              <tr>
+                <td>Build from Source</td>
+                <td>All Cargo targets</td>
+                <td>Rust stable 1.85 or later (Edition 2024)</td>
+              </tr>
+              <tr>
+                <td>npm / npx Wrapper</td>
+                <td>macOS, Linux, Windows</td>
+                <td>Node.js 18 or later</td>
+              </tr>
+              <tr>
+                <td>Relay Server Host</td>
+                <td>Render, Docker, Linux VPS</td>
+                <td>1 open HTTP/HTTPS port, 16 MB free RAM</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 3. Installation -->
+      <section class="doc-sec" id="installation">
+        <h2>3. Installation</h2>
+        <p>Select one installation method for your environment.</p>
+
+        <h3>Method A: Install with Cargo</h3>
+        <ol>
+          <li>Open a terminal window.</li>
+          <li>Run this command to install from crates.io:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>cargo install localhop</code></pre>
+        </div>
+        <p>To install directly from the GitHub repository, run this command:</p>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>cargo install --git https://github.com/Leon24k/localhop localhop</code></pre>
+        </div>
+
+        <h3>Method B: Install with npm or npx</h3>
+        <p>Use this method if your machine does not have Rust installed.</p>
+        <ol>
+          <li>Run localhop directly with <code>npx</code>:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>npx localhop 3000 --server https://your-relay.onrender.com</code></pre>
+        </div>
+        <ol start="2">
+          <li>Or install the package globally:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>npm install -g localhop</code></pre>
+        </div>
+
+        <h3>Method C: Install with the Shell Script (macOS and Linux)</h3>
+        <ol>
+          <li>Run this command to download the release binary to <code>~/.local/bin</code>:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>curl -fsSL https://raw.githubusercontent.com/Leon24k/localhop/main/scripts/install.sh | sh</code></pre>
+        </div>
+        <ol start="2">
+          <li>Check that the binary works:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>localhop --version</code></pre>
+        </div>
+      </section>
+
+      <!-- 4. Quick Start Procedure -->
+      <section class="doc-sec" id="quickstart">
+        <h2>4. Quick Start Procedure</h2>
+        <p>Follow these steps to test a full tunnel on your local computer.</p>
+        <ol>
+          <li>Open Terminal 1 and start the relay server:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>cargo run --release -p localhop-server</code></pre>
+        </div>
+        <ol start="2">
+          <li>Open Terminal 2 and start a sample HTTP server on port <code>3000</code>:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>python3 -m http.server 3000</code></pre>
+        </div>
+        <ol start="3">
+          <li>Open Terminal 3 and open a tunnel to port <code>3000</code>:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>cargo run --release -p localhop -- 3000 -s demo</code></pre>
+        </div>
+        <ol start="4">
+          <li>Open <code>http://127.0.0.1:8080/t/demo</code> in your browser to reach your local server.</li>
+          <li>Open <code>http://127.0.0.1:4040</code> in your browser to see live requests in the inspector.</li>
+        </ol>
+        <div class="callout callout-note">
+          <span class="callout-title">Note</span>
+          <p>Press <code>Ctrl+C</code> in any terminal to stop the process safely.</p>
+        </div>
+      </section>
+
+      <!-- 5. CLI Reference -->
+      <section class="doc-sec" id="cli-reference">
+        <h2>5. CLI Reference (<code>localhop</code>)</h2>
+        <p>Use the <code>localhop</code> command to connect a local service to a relay server.</p>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>localhop &lt;PORT&gt; [OPTIONS]</code></pre>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Flag / Argument</th>
+                <th>Environment Variable</th>
+                <th>Default</th>
+                <th>Function</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>&lt;PORT&gt;</code></td>
+                <td>None</td>
+                <td>Required</td>
+                <td>Sets the local port that receives forwarded traffic.</td>
+              </tr>
+              <tr>
+                <td><code>--host &lt;HOST&gt;</code></td>
+                <td>None</td>
+                <td><code>127.0.0.1</code></td>
+                <td>Sets the local host address for the target service.</td>
+              </tr>
+              <tr>
+                <td><code>--server &lt;URL&gt;</code></td>
+                <td><code>LOCALHOP_SERVER</code></td>
+                <td><code>ws://127.0.0.1:8080</code></td>
+                <td>Sets the relay server URL. Accepts <code>http</code>, <code>https</code>, <code>ws</code>, or <code>wss</code>.</td>
+              </tr>
+              <tr>
+                <td><code>-s, --id &lt;ID&gt;</code></td>
+                <td>None</td>
+                <td>Random 8 chars</td>
+                <td>Requests a fixed tunnel ID. Use 3 to 32 lowercase letters, digits, or hyphens.</td>
+              </tr>
+              <tr>
+                <td><code>--token &lt;SECRET&gt;</code></td>
+                <td><code>LOCALHOP_AUTH_TOKEN</code></td>
+                <td>None</td>
+                <td>Sends the shared secret token to a private relay server.</td>
+              </tr>
+              <tr>
+                <td><code>--basic-auth &lt;U:P&gt;</code></td>
+                <td><code>LOCALHOP_BASIC_AUTH</code></td>
+                <td>None</td>
+                <td>Protects the public URL with HTTP Basic Auth at the relay edge.</td>
+              </tr>
+              <tr>
+                <td><code>--preserve-host</code></td>
+                <td>None</td>
+                <td><code>false</code></td>
+                <td>Keeps the incoming <code>Host</code> header instead of setting <code>&lt;host&gt;:&lt;port&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><code>-q, --quiet</code></td>
+                <td>None</td>
+                <td><code>false</code></td>
+                <td>Hides per-request access log lines in the terminal.</td>
+              </tr>
+              <tr>
+                <td><code>--inspector-port &lt;P&gt;</code></td>
+                <td>None</td>
+                <td><code>4040</code></td>
+                <td>Sets the local port for the web inspector interface.</td>
+              </tr>
+              <tr>
+                <td><code>--no-inspector</code></td>
+                <td>None</td>
+                <td><code>false</code></td>
+                <td>Stops the CLI from starting the local web inspector server.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 6. Server Reference -->
+      <section class="doc-sec" id="server-reference">
+        <h2>6. Relay Server Reference (<code>localhop-server</code>)</h2>
+        <p>Run <code>localhop-server</code> on a host with a public URL or IP address.</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Environment Variable</th>
+                <th>Default</th>
+                <th>Function</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--bind &lt;IP&gt;</code></td>
+                <td><code>LOCALHOP_BIND</code></td>
+                <td><code>0.0.0.0</code></td>
+                <td>Sets the network interface address to listen on.</td>
+              </tr>
+              <tr>
+                <td><code>-p, --port &lt;PORT&gt;</code></td>
+                <td><code>PORT</code></td>
+                <td><code>8080</code></td>
+                <td>Sets the single HTTP and WebSocket port.</td>
+              </tr>
+              <tr>
+                <td><code>--public-url &lt;URL&gt;</code></td>
+                <td><code>LOCALHOP_PUBLIC_URL</code></td>
+                <td>Auto</td>
+                <td>Overrides the detected public base URL for path-routed tunnels.</td>
+              </tr>
+              <tr>
+                <td><code>--base-domain &lt;DOM&gt;</code></td>
+                <td><code>LOCALHOP_BASE_DOMAIN</code></td>
+                <td>None</td>
+                <td>Enables wildcard subdomain routing at <code>&lt;id&gt;.&lt;domain&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><code>--auth-token &lt;TOK&gt;</code></td>
+                <td><code>LOCALHOP_AUTH_TOKEN</code></td>
+                <td>None</td>
+                <td>Requires CLI clients to send this exact token on connect.</td>
+              </tr>
+              <tr>
+                <td><code>--timeout-secs &lt;S&gt;</code></td>
+                <td><code>LOCALHOP_TIMEOUT_SECS</code></td>
+                <td><code>60</code></td>
+                <td>Sets the maximum wait time for an upstream response header.</td>
+              </tr>
+              <tr>
+                <td><code>--max-tunnels &lt;N&gt;</code></td>
+                <td><code>LOCALHOP_MAX_TUNNELS</code></td>
+                <td><code>1000</code></td>
+                <td>Sets the maximum number of simultaneous active tunnels.</td>
+              </tr>
+              <tr>
+                <td><code>--max-body-bytes &lt;B&gt;</code></td>
+                <td><code>LOCALHOP_MAX_BODY_BYTES</code></td>
+                <td><code>52428800</code></td>
+                <td>Sets the maximum HTTP request body size (50 MiB default).</td>
+              </tr>
+              <tr>
+                <td><code>--idle-timeout-secs</code></td>
+                <td><code>LOCALHOP_IDLE_TIMEOUT_SECS</code></td>
+                <td><code>45</code></td>
+                <td>Closes silent or dead tunnel connections after this timeout.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Built-In Relay Endpoints</h3>
+        <ul>
+          <li><code>GET /</code>: Shows live relay status, active tunnel count, and total proxied requests.</li>
+          <li><code>GET /_localhop/health</code>: Returns JSON health metrics for load balancers and Render health checks.</li>
+          <li><code>GET /_localhop/ws</code>: Accepts WebSocket tunnel connections from the CLI client.</li>
+          <li><code>ANY /t/{id}</code> and <code>ANY /t/{id}/{*rest}</code>: Routes public traffic to the matching tunnel.</li>
+        </ul>
+      </section>
+
+      <!-- 7. Live HTTP Inspector -->
+      <section class="doc-sec" id="inspector">
+        <h2>7. Live HTTP Inspector</h2>
+        <p>
+          When the CLI starts, it opens a local web server at <code>http://127.0.0.1:4040</code>. The server keeps the latest 200 requests in a bounded ring buffer and caps each body preview at 128 KiB.
+        </p>
+
+        <h3>Replay a Captured Request</h3>
+        <ol>
+          <li>Open <code>http://127.0.0.1:4040</code> in your browser.</li>
+          <li>Click a request row in the left list.</li>
+          <li>Click <strong>Replay</strong> to send the exact request to your local server again.</li>
+          <li>Or click <strong>Edit &amp; Replay</strong> to change the method, path, headers, or body before you send it.</li>
+        </ol>
+
+        <h3>Export and Replay Offline Fixtures</h3>
+        <ol>
+          <li>Select a captured webhook request in the inspector.</li>
+          <li>Click <strong>Export JSON</strong> to save the request as a local <code>.json</code> file.</li>
+          <li>Later, click <strong>Import</strong> in the top toolbar and select the saved file.</li>
+          <li>The inspector immediately sends the saved request to your local server, even if the remote relay is offline.</li>
+        </ol>
+
+        <div class="callout callout-note">
+          <span class="callout-title">Note</span>
+          <p>The inspector binds only to <code>127.0.0.1</code>. It checks the HTTP <code>Origin</code> header on <code>POST /api/replay</code> and <code>POST /api/clear</code> to block cross-origin browser requests.</p>
+        </div>
+      </section>
+
+      <!-- 8. WebSocket Passthrough -->
+      <section class="doc-sec" id="websockets">
+        <h2>8. WebSocket Passthrough</h2>
+        <p>
+          localhop supports bidirectional text and binary WebSocket connections through the same multiplexed tunnel. You do not need extra flags to enable this feature.
+        </p>
+        <p>
+          When a public client sends an <code>Upgrade: websocket</code> request:
+        </p>
+        <ol>
+          <li>The relay server sends a <code>WsOpen</code> frame to the CLI client.</li>
+          <li>The CLI client opens a WebSocket connection to your local server.</li>
+          <li>The CLI client sends a <code>WsOpened</code> confirmation frame back to the relay server.</li>
+          <li>Both sides stream text and binary frames in real time until either side closes the socket.</li>
+        </ol>
+        <p>
+          This mechanism supports Vite HMR, Next.js Fast Refresh, Socket.IO, and custom WebSocket applications.
+        </p>
+      </section>
+
+      <!-- 9. Relay Deployment -->
+      <section class="doc-sec" id="deployment">
+        <h2>9. Relay Deployment</h2>
+
+        <h3>Deploy on Render (Free Tier)</h3>
+        <ol>
+          <li>Fork or push the <code>localhop</code> repository to your GitHub account.</li>
+          <li>Open the Render dashboard and click <strong>New &rarr; Blueprint</strong>.</li>
+          <li>Select your repository. Render reads <code>render.yaml</code> and builds the multi-stage <code>Dockerfile</code>.</li>
+          <li>Set <code>LOCALHOP_AUTH_TOKEN</code> in the Render environment settings to keep your relay private.</li>
+          <li>Connect your CLI to the Render URL:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>export LOCALHOP_SERVER=https://your-service.onrender.com
+export LOCALHOP_AUTH_TOKEN=your-secret-token
+localhop 3000</code></pre>
+        </div>
+
+        <h3>Deploy with Docker</h3>
+        <ol>
+          <li>Build the container image:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>docker build -t localhop-server .</code></pre>
+        </div>
+        <ol start="2">
+          <li>Start the container:</li>
+        </ol>
+        <div class="code-wrap">
+          <button class="copy-code" type="button">Copy</button>
+          <pre><code>docker run -d -p 8080:8080 \
+  -e LOCALHOP_AUTH_TOKEN=your-secret-token \
+  -e LOCALHOP_MAX_TUNNELS=500 \
+  localhop-server</code></pre>
+        </div>
+
+        <h3>Enable Wildcard Subdomain Routing</h3>
+        <ol>
+          <li>Create a wildcard DNS record (for example, <code>*.hop.example.com</code>) that points to your relay server.</li>
+          <li>Configure HTTPS termination (for example, Caddy, Nginx, or Cloudflare) in front of port <code>8080</code>.</li>
+          <li>Start the relay server with <code>LOCALHOP_BASE_DOMAIN=hop.example.com</code>.</li>
+        </ol>
+      </section>
+
+      <!-- 10. Binary Protocol -->
+      <section class="doc-sec" id="protocol">
+        <h2>10. Binary Protocol Specification</h2>
+        <p>
+          All frames travel inside WebSocket binary messages. Byte <code>0</code> identifies the frame type. Payload frames carry raw bytes without base64 or JSON encoding.
+        </p>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tag</th>
+                <th>Frame Name</th>
+                <th>Wire Layout</th>
+                <th>Direction</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>0x01</code></td><td><code>Hello</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x02</code></td><td><code>Welcome</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x03</code></td><td><code>Error</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x04</code></td><td><code>RequestHead</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x05</code></td><td><code>RequestBody</code></td><td><code>[tag][req_id: 8B BE][raw Bytes]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x06</code></td><td><code>RequestEnd</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x07</code></td><td><code>ResponseHead</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x08</code></td><td><code>ResponseBody</code></td><td><code>[tag][req_id: 8B BE][raw Bytes]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x09</code></td><td><code>ResponseEnd</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x0A</code></td><td><code>Ping</code></td><td><code>[tag][ts_us: 8B BE]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x0B</code></td><td><code>Pong</code></td><td><code>[tag][ts_us: 8B BE]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x0C</code></td><td><code>WsOpen</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x0D</code></td><td><code>WsOpened</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x0E</code></td><td><code>WsMessage</code></td><td><code>[tag][req_id: 8B BE][is_bin: 1B][raw Bytes]</code></td><td>Bidirectional</td></tr>
+              <tr><td><code>0x0F</code></td><td><code>WsClose</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Bidirectional</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 11. Security Controls -->
+      <section class="doc-sec" id="security">
+        <h2>11. Security Controls</h2>
+        <div class="callout callout-caution">
+          <span class="callout-title">Caution</span>
+          <p>Do not run an unauthenticated relay on the public internet without a token. Unknown users can open tunnels and consume your server bandwidth.</p>
+        </div>
+        <div class="callout callout-caution">
+          <span class="callout-title">Caution</span>
+          <p>Always terminate TLS (HTTPS and WSS) in front of a public relay server. Plain HTTP exposes Basic Auth headers, auth tokens, and application payloads in transit.</p>
+        </div>
+        <ul>
+          <li><strong>Constant-Time Verification:</strong> The relay server compares <code>LOCALHOP_AUTH_TOKEN</code> and <code>--basic-auth</code> headers in constant time.</li>
+          <li><strong>Edge Basic Auth:</strong> The relay server rejects unauthorized requests with HTTP <code>401</code> before they cross your tunnel.</li>
+          <li><strong>Reverse-Proxy Headers:</strong> The relay server sets <code>X-Forwarded-Proto</code>, <code>X-Forwarded-Host</code>, <code>X-Forwarded-For</code>, and <code>X-Localhop-Tunnel-Id</code>.</li>
+          <li><strong>Resource Caps:</strong> Use <code>--max-tunnels</code>, <code>--max-body-bytes</code>, and <code>--idle-timeout-secs</code> to limit memory and bandwidth per relay instance.</li>
+        </ul>
+      </section>
+
+      <!-- 12. Troubleshooting -->
+      <section class="doc-sec" id="troubleshooting">
+        <h2>12. Troubleshooting</h2>
+        <p>Use this fault-isolation table to solve common operational errors.</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symptom / Error</th>
+                <th>Possible Cause</th>
+                <th>Corrective Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>502 Bad Gateway: could not reach local server</code></td>
+                <td>No local application listens on the target port.</td>
+                <td>Start your local dev server and check that the port number matches <code>localhop &lt;PORT&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><code>unauthorized: invalid or missing auth token</code></td>
+                <td>The relay requires <code>LOCALHOP_AUTH_TOKEN</code>, or the tokens do not match.</td>
+                <td>Pass the correct token with <code>--token</code> or export <code>LOCALHOP_AUTH_TOKEN</code>.</td>
+              </tr>
+              <tr>
+                <td><code>tunnel id '...' is already in use</code></td>
+                <td>Another active CLI session holds that custom ID.</td>
+                <td>Stop the older session, wait 45 seconds for idle eviction, or choose a different <code>-s</code> ID.</td>
+              </tr>
+              <tr>
+                <td><code>413 Payload Too Large</code></td>
+                <td>The incoming HTTP request body exceeds <code>--max-body-bytes</code>.</td>
+                <td>Increase <code>LOCALHOP_MAX_BODY_BYTES</code> on the relay server.</td>
+              </tr>
+              <tr>
+                <td><code>401 Unauthorized</code> on tunnel URL</td>
+                <td>The tunnel owner enabled <code>--basic-auth</code>.</td>
+                <td>Send valid HTTP Basic Auth credentials in the browser prompt or request header.</td>
+              </tr>
+              <tr>
+                <td><code>could not bind inspector on port 4040</code></td>
+                <td>Another process uses port <code>4040</code>.</td>
+                <td>Pass <code>--inspector-port 4041</code> or disable the UI with <code>--no-inspector</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer class="doc-footer">
+        <div><strong>localhop</strong> &middot; ASD-STE100 Technical Documentation</div>
+        <div>
+          <a href="../">Back to Home</a> &middot;
+          <a href="https://github.com/Leon24k/localhop" target="_blank" rel="noopener">GitHub Repository</a>
+        </div>
+      </footer>
+    </article>
+  </div>
+
+  <script>
+    const menuBtn = document.getElementById("menuBtn");
+    const sidebar = document.getElementById("sidebar");
+    menuBtn.addEventListener("click", () => sidebar.classList.toggle("open"));
+
+    document.querySelectorAll(".side-link").forEach((link) => {
+      link.addEventListener("click", () => sidebar.classList.remove("open"));
+    });
+
+    // Copy buttons on all code blocks
+    document.querySelectorAll(".copy-code").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const code = btn.parentElement.querySelector("code").textContent;
+        try {
+          await navigator.clipboard.writeText(code);
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+        } catch {
+          btn.textContent = "Error";
+        }
+      });
+    });
+
+    // Instant sidebar section filter
+    const searchInput = document.getElementById("docSearch");
+    const sections = Array.from(document.querySelectorAll("section.doc-sec"));
+    const sideLinks = Array.from(document.querySelectorAll(".side-link"));
+
+    searchInput.addEventListener("input", () => {
+      const q = searchInput.value.trim().toLowerCase();
+      sections.forEach((sec) => {
+        const match = !q || sec.textContent.toLowerCase().includes(q);
+        sec.classList.toggle("hidden", !match);
+        const link = sideLinks.find((a) => a.getAttribute("href") === "#" + sec.id);
+        if (link) link.classList.toggle("hidden", !match);
+      });
+    });
+
+    // Highlight active section on scroll
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            sideLinks.forEach((a) => {
+              a.classList.toggle("active", a.getAttribute("href") === "#" + entry.target.id);
+            });
+          }
+        });
+      },
+      { rootMargin: "-20% 0px -70% 0px" }
+    );
+    sections.forEach((sec) => observer.observe(sec));
+  </script>
+</body>
+</html>
