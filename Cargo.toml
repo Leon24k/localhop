@@ -7,14 +7,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Leon24k/localhop"
 readme = "README.md"
 
 [workspace.dependencies]
-localhop-protocol = { version = "0.2.0", path = "crates/localhop-protocol" }
+localhop-protocol = { version = "0.3.0", path = "crates/localhop-protocol" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }

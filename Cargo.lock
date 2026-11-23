@@ -560,7 +560,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "localhop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -573,6 +573,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "localhop-protocol",
+ "rand",
  "serde",
  "serde_json",
  "tokio",
@@ -585,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "localhop-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "serde",
@@ -594,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "localhop-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",

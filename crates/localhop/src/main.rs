@@ -1,3 +1,4 @@
+mod chaos;
 mod config;
 mod forwarder;
 mod inspector;
@@ -16,6 +17,7 @@ use tokio::{sync::mpsc, task::AbortHandle};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 
 use crate::{
+    chaos::{ChaosConfig, ChaosController},
     config::{TunnelSpec, load_config, parse_header_arg},
     forwarder::LocalForwarder,
     inspector::{InspectorHub, start_inspector_server},
@@ -74,6 +76,26 @@ struct Cli {
     /// Disable the local web inspector UI (zero-overhead headless mode)
     #[arg(long, default_value_t = false)]
     no_inspector: bool,
+
+    /// Chaos testing: add artificial delay in milliseconds to forwarded requests
+    #[arg(long, default_value_t = 0)]
+    chaos_delay_ms: u64,
+
+    /// Chaos testing: add random extra jitter (0..=ms) on top of chaos delay
+    #[arg(long, default_value_t = 0)]
+    chaos_jitter_ms: u64,
+
+    /// Chaos testing: percentage (0..=100) of requests to fail with synthetic fault status
+    #[arg(long, default_value_t = 0.0)]
+    chaos_fail_rate: f64,
+
+    /// Chaos testing: HTTP status code returned for synthetic faults (default 503)
+    #[arg(long, default_value_t = 503)]
+    chaos_fail_status: u16,
+
+    /// Chaos testing: only apply chaos to paths starting with this prefix (e.g. `/api`)
+    #[arg(long, default_value = "")]
+    chaos_path: String,
 }
 
 enum SessionEnd {
@@ -137,6 +159,17 @@ async fn main() {
         )
     };
 
+    let chaos_enabled =
+        cli.chaos_delay_ms > 0 || cli.chaos_jitter_ms > 0 || cli.chaos_fail_rate > 0.0;
+    let chaos = ChaosController::new(ChaosConfig {
+        enabled: chaos_enabled,
+        delay_ms: cli.chaos_delay_ms,
+        jitter_ms: cli.chaos_jitter_ms,
+        fail_rate_pct: cli.chaos_fail_rate,
+        fail_status: cli.chaos_fail_status,
+        path_prefix: cli.chaos_path.clone(),
+    });
+
     let mut prepared = Vec::with_capacity(tunnels.len());
     for spec in tunnels {
         if let Some(ref creds) = spec.basic_auth
@@ -161,6 +194,7 @@ async fn main() {
             spec.preserve_host,
             quiet,
             parsed_headers,
+            chaos.clone(),
         );
         prepared.push((spec, forwarder));
     }
@@ -178,7 +212,9 @@ async fn main() {
         let hub = InspectorHub::new(target_summary, ws_url.clone());
         let all_forwarders: Vec<Arc<LocalForwarder>> =
             prepared.iter().map(|(_, f)| f.clone()).collect();
-        match start_inspector_server(inspector_port, hub.clone(), all_forwarders).await {
+        match start_inspector_server(inspector_port, hub.clone(), all_forwarders, chaos.clone())
+            .await
+        {
             Ok(addr) => (Some(hub), Some(format!("http://{addr}"))),
             Err(e) => {
                 eprintln!(
@@ -202,6 +238,12 @@ async fn main() {
     }
     if let Some(url) = &inspector_url {
         println!("  Inspector    ->  \x1b[36m{url}\x1b[0m");
+    }
+    if chaos.is_active() {
+        println!(
+            "  Chaos        ->  \x1b[33mACTIVE\x1b[0m (delay {}ms, jitter {}ms, fail {}% -> {})",
+            cli.chaos_delay_ms, cli.chaos_jitter_ms, cli.chaos_fail_rate, cli.chaos_fail_status
+        );
     }
     println!("  Relay        ->  {ws_url}");
     println!();
@@ -423,6 +465,18 @@ async fn run_session(
     while let Some(msg_res) = ws_rx.next().await {
         match msg_res {
             Ok(Message::Binary(raw)) => match Frame::decode(raw) {
+                Ok(Frame::RequestInline(inline)) => {
+                    let req_id = inline.req_id;
+                    let fwd = forwarder.clone();
+                    let out = outbound_tx.clone();
+                    let hub_clone = hub.clone();
+                    let task_map = in_flight_http_tasks.clone();
+                    let handle = tokio::spawn(async move {
+                        fwd.forward_inline_request(inline, out, hub_clone).await;
+                        task_map.remove(&req_id);
+                    });
+                    in_flight_http_tasks.insert(req_id, handle.abort_handle());
+                }
                 Ok(Frame::RequestHead(head)) => {
                     let req_id = head.req_id;
                     let body_rx = if head.has_body {

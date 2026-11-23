@@ -11,7 +11,9 @@ use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use localhop_protocol::{Frame, Hello, ResponseHead, WsOpened, format_basic_auth_header};
+use localhop_protocol::{
+    Frame, Hello, ResponseHead, ResponseInline, WsOpened, format_basic_auth_header,
+};
 use localhop_server::{Config, build_router};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
@@ -140,6 +142,49 @@ async fn connect_agent(
 
         while let Some(Ok(TungMsg::Binary(raw))) = ws_rx.next().await {
             match Frame::decode(raw).unwrap() {
+                Frame::RequestInline(inline) => {
+                    let req_id = inline.req_id;
+                    let client = client.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let uri = format!("http://{upstream_addr}{}", inline.path_and_query);
+                        let mut builder =
+                            Request::builder().method(inline.method.as_str()).uri(uri);
+                        for (k, v) in inline.headers {
+                            if !k.eq_ignore_ascii_case("host") {
+                                builder = builder.header(k, v);
+                            }
+                        }
+                        let req = builder.body(Full::new(inline.body)).unwrap();
+                        let resp = client.request(req).await.unwrap();
+                        let status = resp.status().as_u16();
+                        let resp_headers: Vec<(String, String)> = resp
+                            .headers()
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                v.to_str()
+                                    .ok()
+                                    .map(|val| (k.as_str().to_string(), val.to_string()))
+                            })
+                            .collect();
+                        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+
+                        out_tx
+                            .send(
+                                Frame::ResponseInline(ResponseInline {
+                                    req_id,
+                                    status,
+                                    headers: resp_headers,
+                                    local_latency_us: 80,
+                                    body: resp_bytes,
+                                })
+                                .encode()
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    });
+                }
                 Frame::RequestHead(head) => {
                     let req_id = head.req_id;
                     let has_body = head.has_body;
@@ -398,6 +443,31 @@ async fn http_streaming_forwarded_headers_and_concurrency() {
     assert!(public_url.ends_with("/t/app1"));
 
     let client = http_client();
+
+    // 0. Small inline webhook POST (<= 16 KiB) -> single-frame RequestInline + ResponseInline
+    let small_payload = Bytes::from_static(br#"{"event":"payment.succeeded"}"#);
+    let req_small = Request::builder()
+        .method("POST")
+        .uri(format!("http://{relay}/t/app1/echo"))
+        .header("content-length", small_payload.len().to_string())
+        .body(Full::new(small_payload.clone()))
+        .unwrap();
+    let resp_small = client.request(req_small).await.unwrap();
+    assert_eq!(resp_small.status(), StatusCode::CREATED);
+    let body_small = String::from_utf8(
+        resp_small
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body_small.contains(&format!("len={}", small_payload.len())),
+        "expected inline webhook body: {body_small}"
+    );
 
     // 1. Large 256 KiB POST body + X-Forwarded-* verification
     let big_payload = Bytes::from(vec![b'x'; 256 * 1024]);

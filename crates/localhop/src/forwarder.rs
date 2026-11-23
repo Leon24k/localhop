@@ -2,12 +2,15 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderName, HeaderValue, Method, Request};
 use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::Frame as HyperFrame;
+use hyper::body::{Body as HyperBody, Frame as HyperFrame};
 use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use localhop_protocol::{Frame, RequestHead, ResponseHead, WsOpen, WsOpened, is_hop_by_hop_header};
+use localhop_protocol::{
+    Frame, INLINE_BODY_LIMIT, RequestHead, RequestInline, ResponseHead, ResponseInline, WsOpen,
+    WsOpened, is_hop_by_hop_header,
+};
 use std::{
     convert::Infallible,
     sync::Arc,
@@ -20,9 +23,12 @@ use tokio_tungstenite::{
     tungstenite::{Message as TungMsg, client::IntoClientRequest},
 };
 
-use crate::inspector::{
-    InspectorHub, MAX_PREVIEW_BYTES, TrafficRecord, format_body_preview,
-    format_body_preview_with_encoding, now_millis,
+use crate::{
+    chaos::{ChaosAction, ChaosController},
+    inspector::{
+        InspectorHub, MAX_PREVIEW_BYTES, TrafficRecord, format_body_preview,
+        format_body_preview_with_encoding, now_millis,
+    },
 };
 
 type StreamingBody = StreamBody<ReceiverStream<Result<HyperFrame<Bytes>, Infallible>>>;
@@ -33,6 +39,7 @@ pub struct LocalForwarder {
     preserve_host: bool,
     quiet: bool,
     custom_headers: Vec<(String, String)>,
+    chaos: Arc<ChaosController>,
     stream_client: Client<HttpConnector, StreamingBody>,
     simple_client: Client<HttpConnector, Full<Bytes>>,
 }
@@ -44,6 +51,7 @@ impl LocalForwarder {
         preserve_host: bool,
         quiet: bool,
         custom_headers: Vec<(String, String)>,
+        chaos: Arc<ChaosController>,
     ) -> Arc<Self> {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
@@ -63,6 +71,7 @@ impl LocalForwarder {
             preserve_host,
             quiet,
             custom_headers,
+            chaos,
             stream_client,
             simple_client,
         })
@@ -114,13 +123,82 @@ impl LocalForwarder {
         builder
     }
 
-    /// Forwards a multiplexed tunnel request to the local dev server.
-    ///
-    /// Fast paths:
-    /// - When `req_body_rx` is `None` (`has_body == false`), skips spawning a body
-    ///   tee task and extra channel allocation completely.
-    /// - When `hub` is `None` (`--no-inspector`), skips all body preview buffering,
-    ///   decompression, and inspector lock contention.
+    /// Single-frame fast path for small requests (`<= 16 KiB`, e.g. JSON webhooks).
+    pub async fn forward_inline_request(
+        &self,
+        inline: RequestInline,
+        outbound_tx: mpsc::Sender<Bytes>,
+        hub: Option<Arc<InspectorHub>>,
+    ) {
+        let started = Instant::now();
+        let req_id = inline.req_id;
+        let capture = hub.is_some();
+
+        let chaos_delay_ms = match self.apply_chaos(&inline.path_and_query).await {
+            Ok(delay_ms) => delay_ms,
+            Err((status, delay_ms)) => {
+                let req_bytes = inline.body.len();
+                let req_preview = if capture {
+                    inline.body[..req_bytes.min(MAX_PREVIEW_BYTES)].to_vec()
+                } else {
+                    Vec::new()
+                };
+                self.emit_chaos_fault(
+                    req_id,
+                    status,
+                    delay_ms,
+                    inline.method,
+                    inline.path_and_query,
+                    inline.headers,
+                    req_preview,
+                    req_bytes,
+                    started,
+                    outbound_tx,
+                    hub,
+                )
+                .await;
+                return;
+            }
+        };
+
+        let req_bytes = inline.body.len();
+        let req_preview = if capture {
+            inline.body[..req_bytes.min(MAX_PREVIEW_BYTES)].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let builder = self.build_upstream_request_parts(
+            &inline.method,
+            &inline.path_and_query,
+            &inline.headers,
+        );
+        let Ok(http_req) = builder.body(Full::new(inline.body)) else {
+            let _ = send_inline_error(&outbound_tx, req_id, 500, "invalid request").await;
+            return;
+        };
+
+        let resp_res = self.simple_client.request(http_req).await;
+        let local_latency_us = started.elapsed().as_micros() as u64;
+
+        self.finish_response(
+            req_id,
+            inline.method,
+            inline.path_and_query,
+            inline.headers,
+            resp_res,
+            local_latency_us,
+            started,
+            chaos_delay_ms,
+            Some((req_preview, req_bytes)),
+            None,
+            outbound_tx,
+            hub,
+        )
+        .await;
+    }
+
+    /// Forwards a multiplexed tunnel request (empty-body fast path or streaming upload).
     pub async fn forward_tunnel_request(
         &self,
         head: RequestHead,
@@ -130,17 +208,37 @@ impl LocalForwarder {
     ) {
         let started = Instant::now();
         let req_id = head.req_id;
-        let record_id = hub.as_ref().map(|h| h.next_record_id());
         let capture = hub.is_some();
+
+        let chaos_delay_ms = match self.apply_chaos(&head.path_and_query).await {
+            Ok(delay_ms) => delay_ms,
+            Err((status, delay_ms)) => {
+                drop(req_body_rx);
+                self.emit_chaos_fault(
+                    req_id,
+                    status,
+                    delay_ms,
+                    head.method,
+                    head.path_and_query,
+                    head.headers,
+                    Vec::new(),
+                    0,
+                    started,
+                    outbound_tx,
+                    hub,
+                )
+                .await;
+                return;
+            }
+        };
 
         let builder =
             self.build_upstream_request_parts(&head.method, &head.path_and_query, &head.headers);
 
         let (resp_res, req_preview_task) = match req_body_rx {
             None => {
-                // Zero-body fast path (GET, HEAD, DELETE, empty POST)
                 let Ok(http_req) = builder.body(Full::new(Bytes::new())) else {
-                    let _ = send_error_response(&outbound_tx, req_id, 500, "invalid request").await;
+                    let _ = send_inline_error(&outbound_tx, req_id, 500, "invalid request").await;
                     return;
                 };
                 (self.simple_client.request(http_req).await, None)
@@ -166,7 +264,7 @@ impl LocalForwarder {
 
                 let body = StreamBody::new(ReceiverStream::new(upstream_rx));
                 let Ok(http_req) = builder.body(body) else {
-                    let _ = send_error_response(&outbound_tx, req_id, 500, "invalid request").await;
+                    let _ = send_inline_error(&outbound_tx, req_id, 500, "invalid request").await;
                     return;
                 };
                 (self.stream_client.request(http_req).await, Some(task))
@@ -175,10 +273,158 @@ impl LocalForwarder {
 
         let local_latency_us = started.elapsed().as_micros() as u64;
 
+        self.finish_response(
+            req_id,
+            head.method,
+            head.path_and_query,
+            head.headers,
+            resp_res,
+            local_latency_us,
+            started,
+            chaos_delay_ms,
+            None,
+            req_preview_task,
+            outbound_tx,
+            hub,
+        )
+        .await;
+    }
+
+    /// Evaluates chaos policy with a single relaxed atomic check when disabled.
+    /// Returns `Ok(injected_delay_ms)` to continue forwarding, or `Err((status, delay_ms))` to inject a fault.
+    async fn apply_chaos(&self, path: &str) -> Result<u64, (u16, u64)> {
+        if !self.chaos.is_active() {
+            return Ok(0);
+        }
+        match self.chaos.evaluate(path).await {
+            ChaosAction::Pass => Ok(0),
+            ChaosAction::Delay(d) => {
+                let ms = d.as_millis() as u64;
+                tokio::time::sleep(d).await;
+                Ok(ms)
+            }
+            ChaosAction::Fault { delay, status } => {
+                let ms = if let Some(d) = delay {
+                    let ms = d.as_millis() as u64;
+                    tokio::time::sleep(d).await;
+                    ms
+                } else {
+                    0
+                };
+                Err((status, ms))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_chaos_fault(
+        &self,
+        req_id: u64,
+        status: u16,
+        delay_ms: u64,
+        method: String,
+        path_and_query: String,
+        req_headers: Vec<(String, String)>,
+        req_preview: Vec<u8>,
+        req_bytes: usize,
+        started: Instant,
+        outbound_tx: mpsc::Sender<Bytes>,
+        hub: Option<Arc<InspectorHub>>,
+    ) {
+        let body_str = format!(
+            r#"{{"error":"localhop chaos fault injected","status":{status},"delay_ms":{delay_ms}}}"#
+        );
+        let body_bytes = Bytes::from(body_str.clone());
+        let resp_headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            (
+                "x-localhop-chaos".to_string(),
+                format!("fault={status};delay_ms={delay_ms}"),
+            ),
+        ];
+        let local_latency_us = started.elapsed().as_micros() as u64;
+
+        if let Ok(encoded) = Frame::ResponseInline(ResponseInline {
+            req_id,
+            status,
+            headers: resp_headers.clone(),
+            local_latency_us,
+            body: body_bytes,
+        })
+        .encode()
+        {
+            let _ = outbound_tx.send(encoded).await;
+        }
+
+        if !self.quiet {
+            print_access_line(
+                status,
+                &method,
+                &path_and_query,
+                local_latency_us,
+                local_latency_us,
+                true,
+            );
+        }
+
+        if let Some(hub) = hub {
+            let id = hub.next_record_id();
+            hub.push_record(TrafficRecord {
+                id,
+                timestamp_ms: now_millis(),
+                source: "chaos".to_string(),
+                target: self.target_display(),
+                method,
+                path_and_query,
+                request_headers: req_headers,
+                request_body: format_body_preview(&req_preview, req_bytes),
+                request_bytes: req_bytes,
+                status,
+                response_headers: resp_headers,
+                response_body: body_str.clone(),
+                response_bytes: body_str.len(),
+                local_latency_us,
+                error: Some(format!("chaos fault injected ({status})")),
+            })
+            .await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_response(
+        &self,
+        req_id: u64,
+        method: String,
+        path_and_query: String,
+        req_headers: Vec<(String, String)>,
+        resp_res: Result<http::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error>,
+        local_latency_us: u64,
+        started: Instant,
+        chaos_delay_ms: u64,
+        inline_req_preview: Option<(Vec<u8>, usize)>,
+        req_preview_task: Option<tokio::task::JoinHandle<(Vec<u8>, usize)>>,
+        outbound_tx: mpsc::Sender<Bytes>,
+        hub: Option<Arc<InspectorHub>>,
+    ) {
+        let capture = hub.is_some();
+
         match resp_res {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
-                let mut resp_headers = Vec::with_capacity(resp.headers().len());
+                let is_sse = resp
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"));
+
+                let declared_len = resp
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or_else(|| resp.body().size_hint().exact());
+
+                let mut resp_headers = Vec::with_capacity(resp.headers().len() + 1);
                 for (n, v) in resp.headers() {
                     if !is_hop_by_hop_header(n.as_str())
                         && let Ok(val) = v.to_str()
@@ -186,85 +432,124 @@ impl LocalForwarder {
                         resp_headers.push((n.as_str().to_string(), val.to_string()));
                     }
                 }
+                if chaos_delay_ms > 0 {
+                    resp_headers.push((
+                        "x-localhop-chaos".to_string(),
+                        format!("delay_ms={chaos_delay_ms}"),
+                    ));
+                }
 
-                let resp_head = Frame::ResponseHead(ResponseHead {
-                    req_id,
-                    status,
-                    headers: if capture {
-                        resp_headers.clone()
-                    } else {
-                        resp_headers
-                    },
-                    local_latency_us,
-                });
-                let saved_resp_headers = if capture {
-                    if let Frame::ResponseHead(ref h) = resp_head {
-                        h.headers.clone()
+                let inline_eligible =
+                    !is_sse && declared_len.is_some_and(|n| n <= INLINE_BODY_LIMIT as u64);
+
+                let (resp_preview, resp_bytes, saved_resp_headers) = if inline_eligible {
+                    // Single-frame fast path: collect small body and emit 1 ResponseInline frame
+                    let body_bytes = resp
+                        .into_body()
+                        .collect()
+                        .await
+                        .map(|c| c.to_bytes())
+                        .unwrap_or_default();
+                    let resp_bytes = body_bytes.len();
+                    let preview = if capture {
+                        body_bytes[..resp_bytes.min(MAX_PREVIEW_BYTES)].to_vec()
                     } else {
                         Vec::new()
+                    };
+                    let saved_hdrs = if capture {
+                        resp_headers.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Ok(encoded) = Frame::ResponseInline(ResponseInline {
+                        req_id,
+                        status,
+                        headers: resp_headers,
+                        local_latency_us,
+                        body: body_bytes,
+                    })
+                    .encode()
+                    {
+                        let _ = outbound_tx.send(encoded).await;
                     }
+                    (preview, resp_bytes, saved_hdrs)
                 } else {
-                    Vec::new()
-                };
+                    // Streaming path for large files, chunked responses, and SSE streams
+                    let saved_hdrs = if capture {
+                        resp_headers.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Ok(bytes) = Frame::ResponseHead(ResponseHead {
+                        req_id,
+                        status,
+                        headers: resp_headers,
+                        local_latency_us,
+                    })
+                    .encode()
+                    {
+                        let _ = outbound_tx.send(bytes).await;
+                    }
 
-                if let Ok(bytes) = resp_head.encode() {
-                    let _ = outbound_tx.send(bytes).await;
-                }
-
-                let mut resp_preview = Vec::new();
-                let mut resp_bytes = 0usize;
-
-                let body_stream = resp.body_mut();
-                while let Some(frame_res) = body_stream.frame().await {
-                    match frame_res {
-                        Ok(frame) => {
-                            if let Ok(data) = frame.into_data()
-                                && !data.is_empty()
-                            {
-                                resp_bytes += data.len();
-                                if capture && resp_preview.len() < MAX_PREVIEW_BYTES {
-                                    let take =
-                                        (MAX_PREVIEW_BYTES - resp_preview.len()).min(data.len());
-                                    resp_preview.extend_from_slice(&data[..take]);
-                                }
-                                if let Ok(bytes) = (Frame::ResponseBody {
-                                    req_id,
-                                    chunk: data,
-                                })
-                                .encode()
-                                    && outbound_tx.send(bytes).await.is_err()
+                    let mut preview = Vec::new();
+                    let mut total_bytes = 0usize;
+                    let body_stream = resp.body_mut();
+                    while let Some(frame_res) = body_stream.frame().await {
+                        match frame_res {
+                            Ok(frame) => {
+                                if let Ok(data) = frame.into_data()
+                                    && !data.is_empty()
                                 {
-                                    break;
+                                    total_bytes += data.len();
+                                    if capture && preview.len() < MAX_PREVIEW_BYTES {
+                                        let take =
+                                            (MAX_PREVIEW_BYTES - preview.len()).min(data.len());
+                                        preview.extend_from_slice(&data[..take]);
+                                    }
+                                    if let Ok(bytes) = (Frame::ResponseBody {
+                                        req_id,
+                                        chunk: data,
+                                    })
+                                    .encode()
+                                        && outbound_tx.send(bytes).await.is_err()
+                                    {
+                                        break;
+                                    }
                                 }
                             }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
-                }
 
-                if let Ok(end) = (Frame::ResponseEnd { req_id }).encode() {
-                    let _ = outbound_tx.send(end).await;
-                }
+                    if let Ok(end) = (Frame::ResponseEnd { req_id }).encode() {
+                        let _ = outbound_tx.send(end).await;
+                    }
+                    (preview, total_bytes, saved_hdrs)
+                };
 
                 if !self.quiet {
                     let total_us = started.elapsed().as_micros() as u64;
                     print_access_line(
                         status,
-                        &head.method,
-                        &head.path_and_query,
+                        &method,
+                        &path_and_query,
                         local_latency_us,
                         total_us,
+                        chaos_delay_ms > 0,
                     );
                 }
 
-                if let (Some(hub), Some(id)) = (hub, record_id) {
-                    let (req_preview, req_bytes) = match req_preview_task {
-                        Some(t) => t.await.unwrap_or_default(),
-                        None => (Vec::new(), 0),
+                if let Some(hub) = hub {
+                    let id = hub.next_record_id();
+                    let (req_preview, req_bytes) = if let Some(p) = inline_req_preview {
+                        p
+                    } else if let Some(t) = req_preview_task {
+                        t.await.unwrap_or_default()
+                    } else {
+                        (Vec::new(), 0)
                     };
                     let request_body = {
-                        let req_encoding = head
-                            .headers
+                        let req_encoding = req_headers
                             .iter()
                             .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
                             .map(|(_, v)| v.as_str());
@@ -281,11 +566,15 @@ impl LocalForwarder {
                     hub.push_record(TrafficRecord {
                         id,
                         timestamp_ms: now_millis(),
-                        source: "tunnel".to_string(),
+                        source: if chaos_delay_ms > 0 {
+                            "chaos".to_string()
+                        } else {
+                            "tunnel".to_string()
+                        },
                         target: self.target_display(),
-                        method: head.method,
-                        path_and_query: head.path_and_query,
-                        request_headers: head.headers,
+                        method,
+                        path_and_query,
+                        request_headers: req_headers,
                         request_body,
                         request_bytes: req_bytes,
                         status,
@@ -303,31 +592,36 @@ impl LocalForwarder {
                     "could not reach local server at http://{}:{}: {err}",
                     self.host, self.port
                 );
-                let _ = send_error_response(&outbound_tx, req_id, 502, &err_msg).await;
+                let _ = send_inline_error(&outbound_tx, req_id, 502, &err_msg).await;
 
                 if !self.quiet {
                     print_access_line(
                         502,
-                        &head.method,
-                        &head.path_and_query,
+                        &method,
+                        &path_and_query,
                         local_latency_us,
                         local_latency_us,
+                        chaos_delay_ms > 0,
                     );
                 }
 
-                if let (Some(hub), Some(id)) = (hub, record_id) {
-                    let (req_preview, req_bytes) = match req_preview_task {
-                        Some(t) => t.await.unwrap_or_default(),
-                        None => (Vec::new(), 0),
+                if let Some(hub) = hub {
+                    let id = hub.next_record_id();
+                    let (req_preview, req_bytes) = if let Some(p) = inline_req_preview {
+                        p
+                    } else if let Some(t) = req_preview_task {
+                        t.await.unwrap_or_default()
+                    } else {
+                        (Vec::new(), 0)
                     };
                     hub.push_record(TrafficRecord {
                         id,
                         timestamp_ms: now_millis(),
                         source: "tunnel".to_string(),
                         target: self.target_display(),
-                        method: head.method,
-                        path_and_query: head.path_and_query,
-                        request_headers: head.headers,
+                        method,
+                        path_and_query,
+                        request_headers: req_headers,
                         request_body: format_body_preview(&req_preview, req_bytes),
                         request_bytes: req_bytes,
                         status: 502,
@@ -353,7 +647,6 @@ impl LocalForwarder {
     ) {
         let started = Instant::now();
         let req_id = open.req_id;
-        let record_id = hub.as_ref().map(|h| h.next_record_id());
         let ws_uri = format!("ws://{}:{}{}", self.host, self.port, open.path_and_query);
 
         let mut req = match ws_uri.into_client_request() {
@@ -399,10 +692,12 @@ impl LocalForwarder {
                         &open.path_and_query,
                         local_latency_us,
                         local_latency_us,
+                        false,
                     );
                 }
 
-                if let (Some(hub), Some(id)) = (hub, record_id) {
+                if let Some(hub) = hub {
+                    let id = hub.next_record_id();
                     hub.push_record(TrafficRecord {
                         id,
                         timestamp_ms: now_millis(),
@@ -489,10 +784,12 @@ impl LocalForwarder {
                         &open.path_and_query,
                         local_latency_us,
                         local_latency_us,
+                        false,
                     );
                 }
 
-                if let (Some(hub), Some(id)) = (hub, record_id) {
+                if let Some(hub) = hub {
+                    let id = hub.next_record_id();
                     hub.push_record(TrafficRecord {
                         id,
                         timestamp_ms: now_millis(),
@@ -623,6 +920,7 @@ impl LocalForwarder {
                         &normalized_path,
                         local_latency_us,
                         local_latency_us,
+                        false,
                     );
                 }
 
@@ -685,13 +983,13 @@ async fn send_ws_opened(
     Ok(())
 }
 
-async fn send_error_response(
+async fn send_inline_error(
     outbound_tx: &mpsc::Sender<Bytes>,
     req_id: u64,
     status: u16,
     message: &str,
 ) -> Result<(), ()> {
-    let head = Frame::ResponseHead(ResponseHead {
+    let frame = Frame::ResponseInline(ResponseInline {
         req_id,
         status,
         headers: vec![(
@@ -699,24 +997,22 @@ async fn send_error_response(
             "text/plain; charset=utf-8".to_string(),
         )],
         local_latency_us: 0,
+        body: Bytes::copy_from_slice(message.as_bytes()),
     });
-    if let Ok(b) = head.encode() {
-        let _ = outbound_tx.send(b).await;
-    }
-    let body = Frame::ResponseBody {
-        req_id,
-        chunk: Bytes::copy_from_slice(message.as_bytes()),
-    };
-    if let Ok(b) = body.encode() {
-        let _ = outbound_tx.send(b).await;
-    }
-    if let Ok(b) = (Frame::ResponseEnd { req_id }).encode() {
+    if let Ok(b) = frame.encode() {
         let _ = outbound_tx.send(b).await;
     }
     Ok(())
 }
 
-fn print_access_line(status: u16, method: &str, path: &str, local_us: u64, total_us: u64) {
+fn print_access_line(
+    status: u16,
+    method: &str,
+    path: &str,
+    local_us: u64,
+    total_us: u64,
+    chaos: bool,
+) {
     let color = match status {
         100..=199 => "\x1b[35m",
         200..=299 => "\x1b[32m",
@@ -724,9 +1020,10 @@ fn print_access_line(status: u16, method: &str, path: &str, local_us: u64, total
         400..=499 => "\x1b[33m",
         _ => "\x1b[31m",
     };
+    let chaos_tag = if chaos { " \x1b[33m[chaos]\x1b[0m" } else { "" };
     let local_ms = local_us as f64 / 1000.0;
     let total_ms = total_us as f64 / 1000.0;
     println!(
-        "  {color}{status:3}\x1b[0m  {method:<6} {path:<40} \x1b[90mlocal {local_ms:.2}ms · total {total_ms:.2}ms\x1b[0m"
+        "  {color}{status:3}\x1b[0m  {method:<6} {path:<40} \x1b[90mlocal {local_ms:.2}ms · total {total_ms:.2}ms\x1b[0m{chaos_tag}"
     );
 }

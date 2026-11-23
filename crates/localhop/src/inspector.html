@@ -77,6 +77,18 @@
     .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .lat { color: var(--muted); font-size: 11px; }
     .tag-replay { font-size: 10px; color: var(--purple); margin-left: 4px; }
+    .tag-chaos { font-size: 10px; color: var(--yellow); margin-left: 4px; }
+    .chaos-btn { border-color: var(--border); font-family: var(--mono); font-size: 12px; }
+    .chaos-btn.active { background: #2d2310; border-color: var(--yellow); color: var(--yellow); }
+    .chaos-bar {
+      display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 16px; background: #141210; border-bottom: 1px solid #3a2f16;
+      font-family: var(--mono); font-size: 12px;
+    }
+    .chaos-bar.open { display: flex; }
+    .chaos-bar label { display: inline-flex; align-items: center; gap: 6px; text-transform: none; font-size: 12px; color: var(--text); }
+    .chaos-bar input[type="number"] { width: 74px; padding: 4px 6px; }
+    .chaos-bar input[type="text"] { width: 120px; padding: 4px 6px; }
 
     .detail { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
     .detail-head {
@@ -130,8 +142,19 @@
       <div class="pill">Local: <strong id="localTarget">—</strong></div>
       <div class="pill">Tunnel RTT: <strong id="rtt">—</strong></div>
       <div class="pill">Requests: <strong id="reqCount">0</strong></div>
+      <button id="chaosToggle" class="chaos-btn" title="Configure live latency & fault injection">⚡ Chaos: OFF</button>
     </div>
   </header>
+
+  <div id="chaosBar" class="chaos-bar">
+    <label><input type="checkbox" id="cEnabled" /> Enabled</label>
+    <label>Delay (ms) <input type="number" id="cDelay" min="0" max="30000" value="0" /></label>
+    <label>Jitter (ms) <input type="number" id="cJitter" min="0" max="10000" value="0" /></label>
+    <label>Fail % <input type="number" id="cFail" min="0" max="100" step="1" value="0" /></label>
+    <label>Status <select id="cStatus"><option value="503">503</option><option value="500">500</option><option value="429">429</option><option value="502">502</option><option value="504">504</option></select></label>
+    <label>Path prefix <input type="text" id="cPath" placeholder="/api" /></label>
+    <button id="cApply" class="primary">Apply Chaos</button>
+  </div>
 
   <div class="main">
     <aside class="sidebar">
@@ -192,7 +215,7 @@
 </dialog>
 
 <script>
-const state = { status: null, records: [], selectedId: null, filter: '' };
+const state = { status: null, chaos: null, records: [], selectedId: null, filter: '' };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -233,7 +256,7 @@ function renderList() {
     <div class="row ${r.id === state.selectedId ? 'active' : ''}" data-id="${r.id}">
       <span class="status ${statusClass(r.status)}">${r.status || 'ERR'}</span>
       <span class="method">${esc(r.method)}</span>
-      <span class="path" title="${esc(r.path_and_query)}">${esc(r.path_and_query)}${r.source === 'replay' ? '<span class="tag-replay">↻</span>' : ''}</span>
+      <span class="path" title="${esc(r.path_and_query)}">${esc(r.path_and_query)}${r.source === 'replay' ? '<span class="tag-replay">↻</span>' : ''}${r.source === 'chaos' ? '<span class="tag-chaos">⚡</span>' : ''}</span>
       <span class="lat">${fmtUs(r.local_latency_us)}</span>
     </div>
   `).join('');
@@ -389,13 +412,51 @@ $('curlBtn').onclick = async () => {
   setTimeout(() => { btn.textContent = 'Copy cURL'; }, 1200);
 };
 
+function renderChaos() {
+  const c = state.chaos;
+  if (!c) return;
+  $('cEnabled').checked = !!c.enabled;
+  $('cDelay').value = c.delay_ms ?? 0;
+  $('cJitter').value = c.jitter_ms ?? 0;
+  $('cFail').value = c.fail_rate_pct ?? 0;
+  $('cStatus').value = String(c.fail_status || 503);
+  $('cPath').value = c.path_prefix || '';
+  const active = c.enabled && ((c.delay_ms || 0) > 0 || (c.jitter_ms || 0) > 0 || (c.fail_rate_pct || 0) > 0);
+  const btn = $('chaosToggle');
+  btn.className = 'chaos-btn' + (active ? ' active' : '');
+  btn.textContent = active ? `⚡ Chaos: ON (${c.delay_ms}ms / ${c.fail_rate_pct}%)` : '⚡ Chaos: OFF';
+}
+
+$('chaosToggle').onclick = () => $('chaosBar').classList.toggle('open');
+$('cApply').onclick = async () => {
+  const payload = {
+    enabled: $('cEnabled').checked,
+    delay_ms: Number($('cDelay').value) || 0,
+    jitter_ms: Number($('cJitter').value) || 0,
+    fail_rate_pct: Number($('cFail').value) || 0,
+    fail_status: Number($('cStatus').value) || 503,
+    path_prefix: $('cPath').value.trim(),
+  };
+  const res = await fetch('/api/chaos', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    state.chaos = await res.json();
+    renderChaos();
+  }
+};
+
 async function boot() {
   const res = await fetch('/api/state');
   const snap = await res.json();
   state.status = snap.status;
+  state.chaos = snap.chaos;
   state.records = snap.records;
   if (state.records.length) state.selectedId = state.records[0].id;
   renderStatus();
+  renderChaos();
   renderList();
   renderDetail();
 
@@ -415,6 +476,9 @@ async function boot() {
     } else if (msg.type === 'status') {
       state.status = msg.status;
       renderStatus();
+    } else if (msg.type === 'chaos') {
+      state.chaos = msg.chaos;
+      renderChaos();
     } else if (msg.type === 'cleared') {
       state.records = [];
       state.selectedId = null;

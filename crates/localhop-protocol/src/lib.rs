@@ -2,11 +2,16 @@ use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Maximum payload size (16 KiB) eligible for single-frame inline transport.
+pub const INLINE_BODY_LIMIT: usize = 16 * 1024;
+
 /// Compact binary frame tags for zero-overhead multiplexed tunneling.
 ///
-/// Hot-path payload frames (`RequestBody`, `ResponseBody`, `WsMessage`) carry a
-/// tiny fixed binary header followed directly by raw `Bytes`—zero JSON or base64
-/// serialization overhead on streamed data.
+/// Control handshake frames (`Hello`, `Welcome`, `Error`, `WsOpen`, `WsOpened`)
+/// use JSON. All hot-path HTTP and WebSocket frames (`RequestHead`, `RequestInline`,
+/// `RequestBody`, `RequestEnd`, `ResponseHead`, `ResponseInline`, `ResponseBody`,
+/// `ResponseEnd`, `WsMessage`, `WsClose`, `Ping`, `Pong`, `Cancel`) use pure
+/// binary encoding with zero JSON serialization or base64 overhead.
 pub mod tag {
     pub const HELLO: u8 = 0x01;
     pub const WELCOME: u8 = 0x02;
@@ -24,6 +29,8 @@ pub mod tag {
     pub const WS_MESSAGE: u8 = 0x0E;
     pub const WS_CLOSE: u8 = 0x0F;
     pub const CANCEL: u8 = 0x10;
+    pub const REQUEST_INLINE: u8 = 0x11;
+    pub const RESPONSE_INLINE: u8 = 0x12;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,28 +53,42 @@ pub struct ProtocolErrorMsg {
     pub message: String,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RequestHead {
     pub req_id: u64,
     pub method: String,
     pub path_and_query: String,
     pub headers: Vec<(String, String)>,
     /// When `false`, the request has no body and no `RequestEnd` frame will follow.
-    #[serde(default = "default_true")]
     pub has_body: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+pub struct RequestInline {
+    pub req_id: u64,
+    pub method: String,
+    pub path_and_query: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Bytes,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResponseHead {
     pub req_id: u64,
     pub status: u16,
     pub headers: Vec<(String, String)>,
     /// Time spent waiting for the local upstream app in microseconds.
     pub local_latency_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseInline {
+    pub req_id: u64,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    /// Time spent waiting for the local upstream app in microseconds.
+    pub local_latency_us: u64,
+    pub body: Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +112,7 @@ pub enum Frame {
     Welcome(Welcome),
     Error(ProtocolErrorMsg),
     RequestHead(RequestHead),
+    RequestInline(RequestInline),
     RequestBody {
         req_id: u64,
         chunk: Bytes,
@@ -99,6 +121,7 @@ pub enum Frame {
         req_id: u64,
     },
     ResponseHead(ResponseHead),
+    ResponseInline(ResponseInline),
     ResponseBody {
         req_id: u64,
         chunk: Bytes,
@@ -133,6 +156,8 @@ pub enum CodecError {
     EmptyFrame,
     UnknownTag(u8),
     TruncatedFrame,
+    InvalidUtf8,
+    LimitExceeded,
     Json(serde_json::Error),
 }
 
@@ -142,6 +167,8 @@ impl fmt::Display for CodecError {
             CodecError::EmptyFrame => write!(f, "empty binary frame"),
             CodecError::UnknownTag(t) => write!(f, "unknown frame tag: 0x{t:02x}"),
             CodecError::TruncatedFrame => write!(f, "truncated binary frame"),
+            CodecError::InvalidUtf8 => write!(f, "invalid UTF-8 in binary header"),
+            CodecError::LimitExceeded => write!(f, "header or field length exceeds u16 limit"),
             CodecError::Json(e) => write!(f, "json codec error: {e}"),
         }
     }
@@ -161,12 +188,14 @@ impl Frame {
             Frame::Hello(v) => encode_json(tag::HELLO, v),
             Frame::Welcome(v) => encode_json(tag::WELCOME, v),
             Frame::Error(v) => encode_json(tag::ERROR, v),
-            Frame::RequestHead(v) => encode_json(tag::REQUEST_HEAD, v),
+            Frame::RequestHead(v) => encode_request_head(v),
+            Frame::RequestInline(v) => encode_request_inline(v),
             Frame::RequestBody { req_id, chunk } => {
                 Ok(encode_body(tag::REQUEST_BODY, *req_id, chunk))
             }
             Frame::RequestEnd { req_id } => Ok(encode_u64(tag::REQUEST_END, *req_id)),
-            Frame::ResponseHead(v) => encode_json(tag::RESPONSE_HEAD, v),
+            Frame::ResponseHead(v) => encode_response_head(v),
+            Frame::ResponseInline(v) => encode_response_inline(v),
             Frame::ResponseBody { req_id, chunk } => {
                 Ok(encode_body(tag::RESPONSE_BODY, *req_id, chunk))
             }
@@ -196,7 +225,8 @@ impl Frame {
             tag::HELLO => Ok(Frame::Hello(serde_json::from_slice(&payload)?)),
             tag::WELCOME => Ok(Frame::Welcome(serde_json::from_slice(&payload)?)),
             tag::ERROR => Ok(Frame::Error(serde_json::from_slice(&payload)?)),
-            tag::REQUEST_HEAD => Ok(Frame::RequestHead(serde_json::from_slice(&payload)?)),
+            tag::REQUEST_HEAD => Ok(Frame::RequestHead(decode_request_head(&payload)?)),
+            tag::REQUEST_INLINE => Ok(Frame::RequestInline(decode_request_inline(payload)?)),
             tag::REQUEST_BODY => {
                 let (req_id, chunk) = decode_body(payload)?;
                 Ok(Frame::RequestBody { req_id, chunk })
@@ -204,7 +234,8 @@ impl Frame {
             tag::REQUEST_END => Ok(Frame::RequestEnd {
                 req_id: decode_u64(&payload)?,
             }),
-            tag::RESPONSE_HEAD => Ok(Frame::ResponseHead(serde_json::from_slice(&payload)?)),
+            tag::RESPONSE_HEAD => Ok(Frame::ResponseHead(decode_response_head(&payload)?)),
+            tag::RESPONSE_INLINE => Ok(Frame::ResponseInline(decode_response_inline(payload)?)),
             tag::RESPONSE_BODY => {
                 let (req_id, chunk) = decode_body(payload)?;
                 Ok(Frame::ResponseBody { req_id, chunk })
@@ -244,6 +275,243 @@ impl Frame {
     }
 }
 
+fn headers_encoded_len(headers: &[(String, String)]) -> usize {
+    2 + headers
+        .iter()
+        .map(|(k, v)| 4 + k.len() + v.len())
+        .sum::<usize>()
+}
+
+fn put_str_u16(buf: &mut BytesMut, s: &str) -> Result<(), CodecError> {
+    let len = u16::try_from(s.len()).map_err(|_| CodecError::LimitExceeded)?;
+    buf.put_u16(len);
+    buf.put_slice(s.as_bytes());
+    Ok(())
+}
+
+fn put_headers(buf: &mut BytesMut, headers: &[(String, String)]) -> Result<(), CodecError> {
+    let count = u16::try_from(headers.len()).map_err(|_| CodecError::LimitExceeded)?;
+    buf.put_u16(count);
+    for (k, v) in headers {
+        put_str_u16(buf, k)?;
+        put_str_u16(buf, v)?;
+    }
+    Ok(())
+}
+
+struct Cursor<'a> {
+    slice: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(slice: &'a [u8]) -> Self {
+        Self { slice, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> Result<u8, CodecError> {
+        if self.pos >= self.slice.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        let b = self.slice[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, CodecError> {
+        if self.pos + 2 > self.slice.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        let v = u16::from_be_bytes([self.slice[self.pos], self.slice[self.pos + 1]]);
+        self.pos += 2;
+        Ok(v)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, CodecError> {
+        if self.pos + 4 > self.slice.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&self.slice[self.pos..self.pos + 4]);
+        self.pos += 4;
+        Ok(u32::from_be_bytes(arr))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, CodecError> {
+        if self.pos + 8 > self.slice.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&self.slice[self.pos..self.pos + 8]);
+        self.pos += 8;
+        Ok(u64::from_be_bytes(arr))
+    }
+
+    fn read_str_u16(&mut self) -> Result<String, CodecError> {
+        let len = usize::from(self.read_u16()?);
+        if self.pos + len > self.slice.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        let s = std::str::from_utf8(&self.slice[self.pos..self.pos + len])
+            .map_err(|_| CodecError::InvalidUtf8)?;
+        self.pos += len;
+        Ok(s.to_string())
+    }
+
+    fn read_headers(&mut self) -> Result<Vec<(String, String)>, CodecError> {
+        let count = usize::from(self.read_u16()?);
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let k = self.read_str_u16()?;
+            let v = self.read_str_u16()?;
+            out.push((k, v));
+        }
+        Ok(out)
+    }
+}
+
+fn encode_request_head(v: &RequestHead) -> Result<Bytes, CodecError> {
+    let cap = 1
+        + 8
+        + 1
+        + 2
+        + v.method.len()
+        + 2
+        + v.path_and_query.len()
+        + headers_encoded_len(&v.headers);
+    let mut buf = BytesMut::with_capacity(cap);
+    buf.put_u8(tag::REQUEST_HEAD);
+    buf.put_u64(v.req_id);
+    buf.put_u8(u8::from(v.has_body));
+    put_str_u16(&mut buf, &v.method)?;
+    put_str_u16(&mut buf, &v.path_and_query)?;
+    put_headers(&mut buf, &v.headers)?;
+    Ok(buf.freeze())
+}
+
+fn decode_request_head(payload: &[u8]) -> Result<RequestHead, CodecError> {
+    let mut c = Cursor::new(payload);
+    let req_id = c.read_u64()?;
+    let has_body = c.read_u8()? != 0;
+    let method = c.read_str_u16()?;
+    let path_and_query = c.read_str_u16()?;
+    let headers = c.read_headers()?;
+    Ok(RequestHead {
+        req_id,
+        method,
+        path_and_query,
+        headers,
+        has_body,
+    })
+}
+
+fn encode_request_inline(v: &RequestInline) -> Result<Bytes, CodecError> {
+    let body_len = u32::try_from(v.body.len()).map_err(|_| CodecError::LimitExceeded)?;
+    let cap = 1
+        + 8
+        + 2
+        + v.method.len()
+        + 2
+        + v.path_and_query.len()
+        + headers_encoded_len(&v.headers)
+        + 4
+        + v.body.len();
+    let mut buf = BytesMut::with_capacity(cap);
+    buf.put_u8(tag::REQUEST_INLINE);
+    buf.put_u64(v.req_id);
+    put_str_u16(&mut buf, &v.method)?;
+    put_str_u16(&mut buf, &v.path_and_query)?;
+    put_headers(&mut buf, &v.headers)?;
+    buf.put_u32(body_len);
+    buf.put_slice(&v.body);
+    Ok(buf.freeze())
+}
+
+fn decode_request_inline(payload: Bytes) -> Result<RequestInline, CodecError> {
+    let (req_id, method, path_and_query, headers, body_start, body_len) = {
+        let mut c = Cursor::new(&payload);
+        let req_id = c.read_u64()?;
+        let method = c.read_str_u16()?;
+        let path_and_query = c.read_str_u16()?;
+        let headers = c.read_headers()?;
+        let body_len = c.read_u32()? as usize;
+        if c.pos + body_len > payload.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        (req_id, method, path_and_query, headers, c.pos, body_len)
+    };
+    let body = payload.slice(body_start..body_start + body_len);
+    Ok(RequestInline {
+        req_id,
+        method,
+        path_and_query,
+        headers,
+        body,
+    })
+}
+
+fn encode_response_head(v: &ResponseHead) -> Result<Bytes, CodecError> {
+    let cap = 1 + 8 + 2 + 8 + headers_encoded_len(&v.headers);
+    let mut buf = BytesMut::with_capacity(cap);
+    buf.put_u8(tag::RESPONSE_HEAD);
+    buf.put_u64(v.req_id);
+    buf.put_u16(v.status);
+    buf.put_u64(v.local_latency_us);
+    put_headers(&mut buf, &v.headers)?;
+    Ok(buf.freeze())
+}
+
+fn decode_response_head(payload: &[u8]) -> Result<ResponseHead, CodecError> {
+    let mut c = Cursor::new(payload);
+    let req_id = c.read_u64()?;
+    let status = c.read_u16()?;
+    let local_latency_us = c.read_u64()?;
+    let headers = c.read_headers()?;
+    Ok(ResponseHead {
+        req_id,
+        status,
+        headers,
+        local_latency_us,
+    })
+}
+
+fn encode_response_inline(v: &ResponseInline) -> Result<Bytes, CodecError> {
+    let body_len = u32::try_from(v.body.len()).map_err(|_| CodecError::LimitExceeded)?;
+    let cap = 1 + 8 + 2 + 8 + headers_encoded_len(&v.headers) + 4 + v.body.len();
+    let mut buf = BytesMut::with_capacity(cap);
+    buf.put_u8(tag::RESPONSE_INLINE);
+    buf.put_u64(v.req_id);
+    buf.put_u16(v.status);
+    buf.put_u64(v.local_latency_us);
+    put_headers(&mut buf, &v.headers)?;
+    buf.put_u32(body_len);
+    buf.put_slice(&v.body);
+    Ok(buf.freeze())
+}
+
+fn decode_response_inline(payload: Bytes) -> Result<ResponseInline, CodecError> {
+    let (req_id, status, local_latency_us, headers, body_start, body_len) = {
+        let mut c = Cursor::new(&payload);
+        let req_id = c.read_u64()?;
+        let status = c.read_u16()?;
+        let local_latency_us = c.read_u64()?;
+        let headers = c.read_headers()?;
+        let body_len = c.read_u32()? as usize;
+        if c.pos + body_len > payload.len() {
+            return Err(CodecError::TruncatedFrame);
+        }
+        (req_id, status, local_latency_us, headers, c.pos, body_len)
+    };
+    let body = payload.slice(body_start..body_start + body_len);
+    Ok(ResponseInline {
+        req_id,
+        status,
+        headers,
+        local_latency_us,
+        body,
+    })
+}
+
 fn encode_json<T: Serialize>(frame_tag: u8, value: &T) -> Result<Bytes, CodecError> {
     let json = serde_json::to_vec(value)?;
     let mut buf = BytesMut::with_capacity(1 + json.len());
@@ -269,11 +537,12 @@ fn encode_ws_message(req_id: u64, is_binary: bool, payload: &Bytes) -> Bytes {
     buf.freeze()
 }
 
+#[inline]
 fn encode_u64(frame_tag: u8, val: u64) -> Bytes {
-    let mut buf = BytesMut::with_capacity(9);
-    buf.put_u8(frame_tag);
-    buf.put_u64(val);
-    buf.freeze()
+    let mut arr = [0u8; 9];
+    arr[0] = frame_tag;
+    arr[1..9].copy_from_slice(&val.to_be_bytes());
+    Bytes::copy_from_slice(&arr)
 }
 
 fn decode_u64(payload: &[u8]) -> Result<u64, CodecError> {
@@ -387,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_request_head() {
+    fn roundtrip_binary_request_and_response_heads() {
         let head = RequestHead {
             req_id: 7,
             method: "POST".into(),
@@ -403,6 +672,64 @@ mod tests {
                 assert_eq!(decoded.path_and_query, head.path_and_query);
                 assert_eq!(decoded.headers, head.headers);
                 assert!(decoded.has_body);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+
+        let rhead = ResponseHead {
+            req_id: 7,
+            status: 201,
+            headers: vec![("x-test".into(), "ok".into())],
+            local_latency_us: 420,
+        };
+        let encoded = Frame::ResponseHead(rhead.clone()).encode().unwrap();
+        match Frame::decode(encoded).unwrap() {
+            Frame::ResponseHead(decoded) => {
+                assert_eq!(decoded.req_id, 7);
+                assert_eq!(decoded.status, 201);
+                assert_eq!(decoded.local_latency_us, 420);
+                assert_eq!(decoded.headers, rhead.headers);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_inline_single_frame_http() {
+        let req = Frame::RequestInline(RequestInline {
+            req_id: 11,
+            method: "POST".into(),
+            path_and_query: "/hooks".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: Bytes::from_static(br#"{"ok":true}"#),
+        })
+        .encode()
+        .unwrap();
+        match Frame::decode(req).unwrap() {
+            Frame::RequestInline(r) => {
+                assert_eq!(r.req_id, 11);
+                assert_eq!(r.method, "POST");
+                assert_eq!(r.path_and_query, "/hooks");
+                assert_eq!(r.body.as_ref(), br#"{"ok":true}"#);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+
+        let resp = Frame::ResponseInline(ResponseInline {
+            req_id: 11,
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            local_latency_us: 280,
+            body: Bytes::from_static(br#"{"received":true}"#),
+        })
+        .encode()
+        .unwrap();
+        match Frame::decode(resp).unwrap() {
+            Frame::ResponseInline(r) => {
+                assert_eq!(r.req_id, 11);
+                assert_eq!(r.status, 200);
+                assert_eq!(r.local_latency_us, 280);
+                assert_eq!(r.body.as_ref(), br#"{"received":true}"#);
             }
             other => panic!("unexpected frame: {other:?}"),
         }

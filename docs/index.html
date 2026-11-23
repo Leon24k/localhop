@@ -711,7 +711,7 @@
       <div class="container">
         <div class="eyebrow">
           <span class="pulse"></span>
-          <span>v0.2.0 &middot; Open Source MIT &middot; Live on crates.io &amp; npm</span>
+          <span>v0.3.0 &middot; Open Source MIT &middot; Live on crates.io &amp; npm</span>
         </div>
 
         <h1>
@@ -804,20 +804,20 @@
 
         <div class="metrics">
           <div class="metric-card">
-            <div class="metric-val cyan">+0.52 ms</div>
-            <div class="metric-label">Added p99 proxy latency</div>
+            <div class="metric-val cyan">+0.29 ms</div>
+            <div class="metric-label">Added median proxy latency</div>
           </div>
           <div class="metric-card">
-            <div class="metric-val emerald">36,275 req/s</div>
+            <div class="metric-val emerald">46,919 req/s</div>
             <div class="metric-label">Loopback throughput (32c)</div>
           </div>
           <div class="metric-card">
-            <div class="metric-val">3.5 MB</div>
-            <div class="metric-label">Stripped CLI binary size</div>
+            <div class="metric-val">2.6 MB</div>
+            <div class="metric-label">Stripped relay binary size</div>
           </div>
           <div class="metric-card">
-            <div class="metric-val">6.9 MB</div>
-            <div class="metric-label">Post-load memory (RSS)</div>
+            <div class="metric-val">5.4 MB</div>
+            <div class="metric-label">Relay post-load RAM (RSS)</div>
           </div>
         </div>
       </div>
@@ -838,16 +838,16 @@
             <div class="feat-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             </div>
-            <h3>Zero-Copy Binary Multiplexing</h3>
-            <p>All concurrent HTTP requests and responses fly over a single persistent WebSocket using 9-byte binary headers and raw Bytes payloads.</p>
+            <h3>Zero-JSON Single-Frame Fast Path</h3>
+            <p>Hot-path HTTP headers use compact binary encoding. Payloads up to 16 KiB travel in 1 frame in and 1 frame out with zero streaming channel allocations.</p>
           </article>
 
           <article class="feat">
             <div class="feat-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </div>
-            <h3>Live Inspector &amp; Offline Replay</h3>
-            <p>Stream headers, pretty JSON, and microsecond latency via SSE on port 4040. Edit and replay webhooks in one click, or export JSON fixtures for offline testing.</p>
+            <h3>Live Inspector &amp; Chaos Testing</h3>
+            <p>Inspect auto-decoded gzip JSON, edit and replay webhooks, or toggle live latency delay, jitter, and synthetic 503/429 faults straight from port 4040.</p>
           </article>
 
           <article class="feat">

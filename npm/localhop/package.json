@@ -1,6 +1,6 @@
 {
   "name": "localhop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Seamless, ultra-low-latency Rust localhost tunnel with built-in live HTTP/webhook inspector & replay",
   "license": "MIT",
   "keywords": [

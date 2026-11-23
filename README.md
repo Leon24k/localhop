@@ -12,9 +12,9 @@
   <p>
     <a href="https://crates.io/crates/localhop"><img src="https://img.shields.io/crates/v/localhop?style=flat-square&logo=rust&color=f74c00" alt="crates.io" /></a>
     <a href="https://www.npmjs.com/package/localhop"><img src="https://img.shields.io/npm/v/localhop?style=flat-square&logo=npm&color=cb3837" alt="npm" /></a>
-    <a href="#benchmarks"><img src="https://img.shields.io/badge/CLI%20Binary-3.5%20MB-10b981?style=flat-square" alt="CLI Binary 3.5 MB" /></a>
-    <a href="#benchmarks"><img src="https://img.shields.io/badge/Added%20p99-+0.52ms-6366f1?style=flat-square" alt="Added p99 +0.52ms" /></a>
-    <a href="#benchmarks"><img src="https://img.shields.io/badge/Runtime-Zero%20GC-a855f7?style=flat-square" alt="Zero GC" /></a>
+    <a href="#benchmarks"><img src="https://img.shields.io/badge/Relay%20Binary-2.6%20MB-10b981?style=flat-square" alt="Relay Binary 2.6 MB" /></a>
+    <a href="#benchmarks"><img src="https://img.shields.io/badge/Added%20p50-+0.29ms-6366f1?style=flat-square" alt="Added p50 +0.29ms" /></a>
+    <a href="#benchmarks"><img src="https://img.shields.io/badge/Throughput-46.9k%20req%2Fs-38bdf8?style=flat-square" alt="Throughput 46.9k req/s" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-94a3b8?style=flat-square" alt="MIT License" /></a>
   </p>
 
@@ -40,9 +40,10 @@ Most commercial tunnels enforce monthly request caps, browser interstitial warni
 
 **`localhop`** combines both in two tiny, zero-GC Rust binaries:
 
-- **Sub-Millisecond Proxy Overhead** — Multiplexed binary framing (`9 B` header + raw `bytes::Bytes` chunks) streams HTTP bodies without base64/JSON serialization overhead or garbage-collector pauses.
+- **Zero-JSON Binary Multiplexing & Single-Frame Fast Path** — Hot-path HTTP headers and small payloads (`<= 16 KiB`) travel in a single compact binary frame (`+0.29 ms` median overhead, `46,919 req/s` loopback) with zero streaming channel allocations on the relay.
+- **Built-In Live Chaos & Fault Injection** — Simulate slow networks (`--chaos-delay-ms`, `--chaos-jitter-ms`) and synthetic `503`/`429`/`500` webhook failures (`--chaos-fail-rate`, `--chaos-path`) from the CLI or toggle live inside `:4040` with zero restart and zero overhead when off.
 - **Full WebSocket Passthrough** — Works seamlessly with Vite HMR, Next.js Fast Refresh, Socket.IO, and custom WebSocket backends over the same multiplexed tunnel.
-- **Built-In Live Inspector & Offline Replay (`localhost:4040`)** — Watch incoming requests and webhooks stream live over SSE with pretty-printed JSON, headers, microsecond latency breakdown, **1-click Replay**, **Edit & Replay**, **Export/Import JSON fixtures**, and **Copy as cURL**.
+- **Built-In Live Inspector & Offline Replay (`localhost:4040`)** — Watch incoming requests and webhooks stream live over SSE with auto `gzip`/`deflate` JSON decoding, **1-click Replay**, **Edit & Replay**, **Export/Import JSON fixtures**, and **Copy as cURL**.
 - **Production-Hardened Out of the Box** — Constant-time auth token & `--basic-auth` edge checks, `X-Forwarded-*` proxy headers, configurable body & tunnel caps, zombie tunnel eviction, and localhost CSRF protection on the Inspector API.
 - **Flat Memory Under Load** — Lock-free routing (`DashMap`) + a bounded 200-request ring buffer keep RSS around **~4–7 MB** even after thousands of concurrent requests.
 - **$0 Self-Hostable Relay** — Speaks single-port HTTP + WebSocket so you can host your own private relay for free on **Render** (no VPS, no raw TCP/UDP port config, no browser warning page, no request caps).
@@ -82,18 +83,19 @@ Measured with release binaries (`lto = "thin"`, `strip = true`, `opt-level = 3`)
 
 | Path | Throughput | p50 | p95 | p99 | p99.9 |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Direct (`localhost:13001`)** | `81,315 req/s` | `0.33 ms` | `0.74 ms` | `1.34 ms` | `1.79 ms` |
-| **Through `localhop` (Relay + CLI + Inspector ON)** | **`36,275 req/s`** | **`0.81 ms`** | **`1.51 ms`** | **`1.86 ms`** | **`2.33 ms`** |
-| **Net `localhop` Proxy Overhead** | — | **`+0.48 ms`** | **`+0.77 ms`** | **`+0.52 ms`** | **`+0.54 ms`** |
+| **Direct (`localhost:13001`)** | `88,279 req/s` | `0.32 ms` | `0.69 ms` | `1.11 ms` | `1.57 ms` |
+| **Through `localhop` (Inspector ON)** | **`43,936 req/s`** | **`0.63 ms`** | **`1.42 ms`** | `3.20 ms` | `3.91 ms` |
+| **Through `localhop` (`--no-inspector`)** | **`46,919 req/s`** | **`0.61 ms`** | **`1.11 ms`** | `2.90 ms` | `3.63 ms` |
+| **Net Median Overhead (`p50`)** | — | **`+0.29 ms`** | **`+0.34 ms`** | — | — |
 
-> Notice how flat the tail latency stays: adding `localhop` adds only **+0.48 ms** at median and **+0.54 ms** at **p99.9**—no stop-the-world GC spikes.
+> Small HTTP requests and responses (`<= 16 KiB`) use `localhop`'s zero-JSON single-frame binary fast path (`RequestInline` / `ResponseInline`) and batched WebSocket writes (`feed` + `flush`), keeping median proxy overhead under **300 microseconds**.
 
 ### Footprint (Binary Size & Memory RSS)
 
 | Component | Stripped Binary Size | Idle RSS | Post-Load RSS *(3k reqs @ 32c)* |
 | :--- | ---: | ---: | ---: |
-| **`localhop-server`** *(Axum relay)* | **`2.4 MB`** | `3.9 MB` | `5.6 MB` |
-| **`localhop`** *(CLI + embedded Inspector UI)* | **`3.5 MB`** | `4.3 MB` | `6.9 MB` |
+| **`localhop-server`** *(Axum relay)* | **`2.6 MB`** | `4.0 MB` | **`5.4 MB`** |
+| **`localhop`** *(CLI + Inspector + Chaos + Gzip + TOML)* | **`3.9 MB`** | `4.7 MB` | `7.7 – 8.2 MB` |
 
 ### Reproduce on Your Machine
 

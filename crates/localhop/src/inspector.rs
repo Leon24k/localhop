@@ -26,7 +26,10 @@ use std::{
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-use crate::forwarder::LocalForwarder;
+use crate::{
+    chaos::{ChaosConfig, ChaosController},
+    forwarder::LocalForwarder,
+};
 
 const MAX_RECORDS: usize = 200;
 pub const MAX_PREVIEW_BYTES: usize = 128 * 1024;
@@ -67,6 +70,7 @@ pub struct TunnelStatus {
 pub enum InspectorEvent {
     Record { record: TrafficRecord },
     Status { status: TunnelStatus },
+    Chaos { chaos: ChaosConfig },
     Cleared,
 }
 
@@ -148,6 +152,10 @@ impl InspectorHub {
     pub async fn clear(&self) {
         self.records.write().await.clear();
         let _ = self.events_tx.send(InspectorEvent::Cleared);
+    }
+
+    pub fn broadcast_chaos(&self, chaos: ChaosConfig) {
+        let _ = self.events_tx.send(InspectorEvent::Chaos { chaos });
     }
 }
 
@@ -237,12 +245,14 @@ mod tests {
 struct InspectorAppState {
     hub: Arc<InspectorHub>,
     forwarders: Vec<Arc<LocalForwarder>>,
+    chaos: Arc<ChaosController>,
     bound_port: u16,
 }
 
 #[derive(Serialize)]
 struct SnapshotResponse {
     status: TunnelStatus,
+    chaos: ChaosConfig,
     records: Vec<TrafficRecord>,
 }
 
@@ -276,6 +286,7 @@ pub async fn start_inspector_server(
     port: u16,
     hub: Arc<InspectorHub>,
     forwarders: Vec<Arc<LocalForwarder>>,
+    chaos: Arc<ChaosController>,
 ) -> Result<SocketAddr, std::io::Error> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -284,6 +295,7 @@ pub async fn start_inspector_server(
     let state = Arc::new(InspectorAppState {
         hub,
         forwarders,
+        chaos,
         bound_port: local_addr.port(),
     });
 
@@ -292,6 +304,7 @@ pub async fn start_inspector_server(
         .route("/api/state", get(get_state))
         .route("/api/events", get(sse_events))
         .route("/api/replay", post(replay_handler))
+        .route("/api/chaos", post(chaos_handler))
         .route("/api/clear", post(clear_handler))
         .with_state(state);
 
@@ -304,8 +317,26 @@ pub async fn start_inspector_server(
 
 async fn get_state(State(state): State<Arc<InspectorAppState>>) -> Json<SnapshotResponse> {
     let status = state.hub.status.read().await.clone();
+    let chaos = state.chaos.get().await;
     let records = state.hub.records.read().await.iter().cloned().collect();
-    Json(SnapshotResponse { status, records })
+    Json(SnapshotResponse {
+        status,
+        chaos,
+        records,
+    })
+}
+
+async fn chaos_handler(
+    State(state): State<Arc<InspectorAppState>>,
+    headers: HeaderMap,
+    Json(next): Json<ChaosConfig>,
+) -> impl IntoResponse {
+    if !is_allowed_local_origin(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "cross-origin chaos update blocked").into_response();
+    }
+    let updated = state.chaos.update(next).await;
+    state.hub.broadcast_chaos(updated.clone());
+    (StatusCode::OK, Json(updated)).into_response()
 }
 
 async fn sse_events(

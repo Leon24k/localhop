@@ -1,7 +1,6 @@
-use axum::body::HttpBody;
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, HttpBody},
     extract::{
         ConnectInfo, FromRequest, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -16,8 +15,9 @@ use dashmap::DashMap;
 use futures_util::{SinkExt, Stream, StreamExt};
 use http_body_util::BodyExt;
 use localhop_protocol::{
-    Frame, Hello, ProtocolErrorMsg, RequestHead, ResponseHead, Welcome, WsOpen, WsOpened,
-    constant_time_eq, format_basic_auth_header, is_hop_by_hop_header, is_valid_tunnel_id,
+    Frame, Hello, INLINE_BODY_LIMIT, ProtocolErrorMsg, RequestHead, RequestInline, ResponseHead,
+    ResponseInline, Welcome, WsOpen, WsOpened, constant_time_eq, format_basic_auth_header,
+    is_hop_by_hop_header, is_valid_tunnel_id,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -152,9 +152,16 @@ impl IpRateLimiter {
     }
 }
 
-struct PendingResponse {
-    head_tx: Option<oneshot::Sender<ResponseHead>>,
-    body_tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+enum IncomingResponse {
+    /// Single-frame small response (`<= 16 KiB`): zero streaming channel allocation.
+    Inline(ResponseInline),
+    /// Multi-frame streamed response (large files, SSE, chunked bodies).
+    Streamed(ResponseHead, mpsc::Receiver<Result<Bytes, std::io::Error>>),
+}
+
+enum PendingHttp {
+    AwaitingHead(oneshot::Sender<IncomingResponse>),
+    Streaming(mpsc::Sender<Result<Bytes, std::io::Error>>),
 }
 
 struct PendingWs {
@@ -164,7 +171,7 @@ struct PendingWs {
 
 struct TunnelSession {
     outbound_tx: mpsc::Sender<Bytes>,
-    pending_http: DashMap<u64, PendingResponse>,
+    pending_http: DashMap<u64, PendingHttp>,
     pending_ws: DashMap<u64, PendingWs>,
     next_req_id: AtomicU64,
     expected_basic_auth: Option<String>,
@@ -418,7 +425,6 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
             if ws_tx.feed(Message::Binary(frame_bytes)).await.is_err() {
                 break;
             }
-            // Coalesce immediately queued frames into a single TCP write syscall
             for _ in 0..31 {
                 match outbound_rx.try_recv() {
                     Ok(more) => {
@@ -456,15 +462,32 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
 
         match next_msg {
             Message::Binary(raw) => match Frame::decode(raw) {
-                Ok(Frame::ResponseHead(head)) => {
-                    if let Some(mut entry) = session.pending_http.get_mut(&head.req_id)
-                        && let Some(tx) = entry.head_tx.take()
+                Ok(Frame::ResponseInline(inline)) => {
+                    if let Some((_, PendingHttp::AwaitingHead(tx))) =
+                        session.pending_http.remove(&inline.req_id)
                     {
-                        let _ = tx.send(head);
+                        let _ = tx.send(IncomingResponse::Inline(inline));
+                    }
+                }
+                Ok(Frame::ResponseHead(head)) => {
+                    let req_id = head.req_id;
+                    if let Some((_, PendingHttp::AwaitingHead(tx))) =
+                        session.pending_http.remove(&req_id)
+                    {
+                        let (body_tx, body_rx) = mpsc::channel(BODY_CHANNEL_CAPACITY);
+                        session
+                            .pending_http
+                            .insert(req_id, PendingHttp::Streaming(body_tx));
+                        if tx.send(IncomingResponse::Streamed(head, body_rx)).is_err() {
+                            session.pending_http.remove(&req_id);
+                        }
                     }
                 }
                 Ok(Frame::ResponseBody { req_id, chunk }) => {
-                    let body_tx = session.pending_http.get(&req_id).map(|e| e.body_tx.clone());
+                    let body_tx = session.pending_http.get(&req_id).and_then(|e| match &*e {
+                        PendingHttp::Streaming(tx) => Some(tx.clone()),
+                        PendingHttp::AwaitingHead(_) => None,
+                    });
                     if let Some(tx) = body_tx
                         && tx.send(Ok(chunk)).await.is_err()
                     {
@@ -746,6 +769,41 @@ fn collect_forwarded_headers(
     out
 }
 
+fn apply_response_headers(
+    builder: &mut http::response::Builder,
+    headers: Vec<(String, String)>,
+    path_prefix: Option<&str>,
+    local_latency_us: u64,
+    total_us: u64,
+) {
+    if let Some(hdrs) = builder.headers_mut() {
+        for (name, val) in headers {
+            if is_hop_by_hop_header(&name) {
+                continue;
+            }
+            let effective_val = if name.eq_ignore_ascii_case("location")
+                && let Some(prefix) = path_prefix
+            {
+                rewrite_location_for_path_prefix(&val, prefix)
+            } else {
+                val
+            };
+            if let (Ok(hn), Ok(hv)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&effective_val),
+            ) {
+                hdrs.append(hn, hv);
+            }
+        }
+        if let Ok(v) = HeaderValue::from_str(&local_latency_us.to_string()) {
+            hdrs.insert(HeaderName::from_static("x-localhop-local-us"), v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&total_us.to_string()) {
+            hdrs.insert(HeaderName::from_static("x-localhop-total-us"), v);
+        }
+    }
+}
+
 async fn proxy_to_tunnel(
     state: Arc<AppState>,
     tunnel_id: &str,
@@ -780,11 +838,13 @@ async fn proxy_to_tunnel(
         return proxy_ws_to_tunnel(state, session, tunnel_id, path_and_query, req).await;
     }
 
-    if let Some(cl) = req
+    let declared_len = req
         .headers()
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    if let Some(cl) = declared_len
         && cl > state.config.max_body_bytes
     {
         return (
@@ -808,41 +868,90 @@ async fn proxy_to_tunnel(
 
     let (parts, mut body) = req.into_parts();
     let headers = collect_forwarded_headers(&parts.headers, peer_ip, tunnel_id);
+    let method = parts.method.as_str().to_string();
 
-    let (head_tx, head_rx) = oneshot::channel();
-    let (body_tx, body_rx) = mpsc::channel(BODY_CHANNEL_CAPACITY);
+    let (resp_tx, resp_rx) = oneshot::channel();
+    session
+        .pending_http
+        .insert(req_id, PendingHttp::AwaitingHead(resp_tx));
 
-    session.pending_http.insert(
-        req_id,
-        PendingResponse {
-            head_tx: Some(head_tx),
-            body_tx,
-        },
-    );
+    let is_empty = body.is_end_stream();
+    let inline_eligible = !is_empty
+        && declared_len
+            .or_else(|| body.size_hint().exact())
+            .is_some_and(|n| n <= INLINE_BODY_LIMIT as u64);
 
-    let has_body = !body.is_end_stream();
-    let head_frame = Frame::RequestHead(RequestHead {
-        req_id,
-        method: parts.method.as_str().to_string(),
-        path_and_query,
-        headers,
-        has_body,
-    });
-    let Ok(encoded_head) = head_frame.encode() else {
-        session.pending_http.remove(&req_id);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to encode request",
-        )
-            .into_response();
-    };
-    if session.outbound_tx.send(encoded_head).await.is_err() {
-        session.pending_http.remove(&req_id);
-        return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
-    }
+    if is_empty {
+        // Fast path 1: empty-body request -> 1 single binary frame
+        let Ok(encoded) = Frame::RequestHead(RequestHead {
+            req_id,
+            method,
+            path_and_query,
+            headers,
+            has_body: false,
+        })
+        .encode() else {
+            session.pending_http.remove(&req_id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode request",
+            )
+                .into_response();
+        };
+        if session.outbound_tx.send(encoded).await.is_err() {
+            session.pending_http.remove(&req_id);
+            return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
+        }
+    } else if inline_eligible {
+        // Fast path 2: small request body (<= 16 KiB, e.g. JSON webhooks) -> 1 single binary frame
+        let collected = match body.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(_) => {
+                session.pending_http.remove(&req_id);
+                return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
+            }
+        };
+        let Ok(encoded) = Frame::RequestInline(RequestInline {
+            req_id,
+            method,
+            path_and_query,
+            headers,
+            body: collected,
+        })
+        .encode() else {
+            session.pending_http.remove(&req_id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode request",
+            )
+                .into_response();
+        };
+        if session.outbound_tx.send(encoded).await.is_err() {
+            session.pending_http.remove(&req_id);
+            return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
+        }
+    } else {
+        // Streaming path for large/chunked uploads
+        let Ok(encoded_head) = Frame::RequestHead(RequestHead {
+            req_id,
+            method,
+            path_and_query,
+            headers,
+            has_body: true,
+        })
+        .encode() else {
+            session.pending_http.remove(&req_id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode request",
+            )
+                .into_response();
+        };
+        if session.outbound_tx.send(encoded_head).await.is_err() {
+            session.pending_http.remove(&req_id);
+            return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
+        }
 
-    // Fast path: skip spawning a body-streaming task and RequestEnd frame when body is empty
-    if has_body {
         let outbound_tx = session.outbound_tx.clone();
         let max_body = state.config.max_body_bytes;
         tokio::spawn(async move {
@@ -878,8 +987,8 @@ async fn proxy_to_tunnel(
     }
 
     let timeout = Duration::from_secs(state.config.timeout_secs);
-    let resp_head = match tokio::time::timeout(timeout, head_rx).await {
-        Ok(Ok(head)) => head,
+    let incoming = match tokio::time::timeout(timeout, resp_rx).await {
+        Ok(Ok(resp)) => resp,
         Ok(Err(_)) => {
             session.pending_http.remove(&req_id);
             return (StatusCode::BAD_GATEWAY, "tunnel closed before response").into_response();
@@ -893,46 +1002,44 @@ async fn proxy_to_tunnel(
         }
     };
 
-    let status = StatusCode::from_u16(resp_head.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut builder = Response::builder().status(status);
+    let total_us = started.elapsed().as_micros() as u64;
 
-    if let Some(hdrs) = builder.headers_mut() {
-        for (name, val) in resp_head.headers {
-            if is_hop_by_hop_header(&name) {
-                continue;
-            }
-            let effective_val = if name.eq_ignore_ascii_case("location")
-                && let Some(prefix) = path_prefix
-            {
-                rewrite_location_for_path_prefix(&val, prefix)
-            } else {
-                val
+    match incoming {
+        IncomingResponse::Inline(inline) => {
+            let status = StatusCode::from_u16(inline.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut builder = Response::builder().status(status);
+            apply_response_headers(
+                &mut builder,
+                inline.headers,
+                path_prefix,
+                inline.local_latency_us,
+                total_us,
+            );
+            builder.body(Body::from(inline.body)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
+            })
+        }
+        IncomingResponse::Streamed(resp_head, body_rx) => {
+            let status = StatusCode::from_u16(resp_head.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut builder = Response::builder().status(status);
+            apply_response_headers(
+                &mut builder,
+                resp_head.headers,
+                path_prefix,
+                resp_head.local_latency_us,
+                total_us,
+            );
+            let stream = CancelOnDropStream {
+                inner: ReceiverStream::new(body_rx),
+                session,
+                req_id,
+                completed: false,
             };
-            if let (Ok(hn), Ok(hv)) = (
-                HeaderName::from_bytes(name.as_bytes()),
-                HeaderValue::from_str(&effective_val),
-            ) {
-                hdrs.append(hn, hv);
-            }
-        }
-        let total_us = started.elapsed().as_micros() as u64;
-        if let Ok(v) = HeaderValue::from_str(&resp_head.local_latency_us.to_string()) {
-            hdrs.insert(HeaderName::from_static("x-localhop-local-us"), v);
-        }
-        if let Ok(v) = HeaderValue::from_str(&total_us.to_string()) {
-            hdrs.insert(HeaderName::from_static("x-localhop-total-us"), v);
+            builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
+            })
         }
     }
-
-    let stream = CancelOnDropStream {
-        inner: ReceiverStream::new(body_rx),
-        session,
-        req_id,
-        completed: false,
-    };
-    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
-    })
 }
 
 async fn proxy_ws_to_tunnel(

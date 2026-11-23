@@ -414,7 +414,7 @@
 
     <article class="doc" id="docContent">
       <div class="doc-header">
-        <div class="std-pill">Reference Manual &middot; Version 0.2.0</div>
+        <div class="std-pill">Reference Manual &middot; Version 0.3.0</div>
         <h1>localhop Technical Documentation</h1>
         <p class="lead">
           This manual explains how to install, configure, operate, and troubleshoot the localhop CLI client and the localhop relay server.
@@ -437,7 +437,7 @@
         </ul>
         <div class="callout callout-note">
           <span class="callout-title">Note</span>
-          <p>All examples in this manual assume <code>localhop</code> version <code>0.2.0</code>.</p>
+          <p>All examples in this manual assume <code>localhop</code> version <code>0.3.0</code>.</p>
         </div>
       </section>
 
@@ -660,6 +660,36 @@
                 <td><code>false</code></td>
                 <td>Stops the CLI from starting the local web inspector server.</td>
               </tr>
+              <tr>
+                <td><code>--chaos-delay-ms &lt;MS&gt;</code></td>
+                <td>None</td>
+                <td><code>0</code></td>
+                <td>Adds artificial latency in milliseconds before forwarding matching requests.</td>
+              </tr>
+              <tr>
+                <td><code>--chaos-jitter-ms &lt;MS&gt;</code></td>
+                <td>None</td>
+                <td><code>0</code></td>
+                <td>Adds random extra jitter from 0 to MS milliseconds on top of chaos delay.</td>
+              </tr>
+              <tr>
+                <td><code>--chaos-fail-rate &lt;PCT&gt;</code></td>
+                <td>None</td>
+                <td><code>0.0</code></td>
+                <td>Injects synthetic HTTP errors on PCT percent (0 to 100) of matching requests.</td>
+              </tr>
+              <tr>
+                <td><code>--chaos-fail-status &lt;S&gt;</code></td>
+                <td>None</td>
+                <td><code>503</code></td>
+                <td>Sets the HTTP status code returned by synthetic chaos faults (400 to 599).</td>
+              </tr>
+              <tr>
+                <td><code>--chaos-path &lt;PREFIX&gt;</code></td>
+                <td>None</td>
+                <td>All paths</td>
+                <td>Limits chaos delay and fault injection to paths starting with this prefix.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -868,10 +898,10 @@ localhop 3000</code></pre>
               <tr><td><code>0x01</code></td><td><code>Hello</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
               <tr><td><code>0x02</code></td><td><code>Welcome</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
               <tr><td><code>0x03</code></td><td><code>Error</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
-              <tr><td><code>0x04</code></td><td><code>RequestHead</code></td><td><code>[tag][JSON]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x04</code></td><td><code>RequestHead</code></td><td><code>[tag][req_id: 8B][has_body: 1B][binary headers]</code></td><td>Relay &rarr; CLI</td></tr>
               <tr><td><code>0x05</code></td><td><code>RequestBody</code></td><td><code>[tag][req_id: 8B BE][raw Bytes]</code></td><td>Relay &rarr; CLI</td></tr>
               <tr><td><code>0x06</code></td><td><code>RequestEnd</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Relay &rarr; CLI</td></tr>
-              <tr><td><code>0x07</code></td><td><code>ResponseHead</code></td><td><code>[tag][JSON]</code></td><td>CLI &rarr; Relay</td></tr>
+              <tr><td><code>0x07</code></td><td><code>ResponseHead</code></td><td><code>[tag][req_id: 8B][status: 2B][lat_us: 8B][binary headers]</code></td><td>CLI &rarr; Relay</td></tr>
               <tr><td><code>0x08</code></td><td><code>ResponseBody</code></td><td><code>[tag][req_id: 8B BE][raw Bytes]</code></td><td>CLI &rarr; Relay</td></tr>
               <tr><td><code>0x09</code></td><td><code>ResponseEnd</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>CLI &rarr; Relay</td></tr>
               <tr><td><code>0x0A</code></td><td><code>Ping</code></td><td><code>[tag][ts_us: 8B BE]</code></td><td>CLI &rarr; Relay</td></tr>
@@ -881,6 +911,8 @@ localhop 3000</code></pre>
               <tr><td><code>0x0E</code></td><td><code>WsMessage</code></td><td><code>[tag][req_id: 8B BE][is_bin: 1B][raw Bytes]</code></td><td>Bidirectional</td></tr>
               <tr><td><code>0x0F</code></td><td><code>WsClose</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Bidirectional</td></tr>
               <tr><td><code>0x10</code></td><td><code>Cancel</code></td><td><code>[tag][req_id: 8B BE]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x11</code></td><td><code>RequestInline</code></td><td><code>[tag][req_id: 8B][binary headers][len: 4B][raw Bytes]</code></td><td>Relay &rarr; CLI</td></tr>
+              <tr><td><code>0x12</code></td><td><code>ResponseInline</code></td><td><code>[tag][req_id: 8B][status: 2B][lat_us: 8B][binary headers][len: 4B][raw Bytes]</code></td><td>CLI &rarr; Relay</td></tr>
             </tbody>
           </table>
         </div>
