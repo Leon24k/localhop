@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{Message as TungMsg, client::IntoClientRequest},
 };
 
@@ -34,7 +34,7 @@ pub struct LocalForwarder {
     quiet: bool,
     custom_headers: Vec<(String, String)>,
     stream_client: Client<HttpConnector, StreamingBody>,
-    replay_client: Client<HttpConnector, Full<Bytes>>,
+    simple_client: Client<HttpConnector, Full<Bytes>>,
 }
 
 impl LocalForwarder {
@@ -53,7 +53,7 @@ impl LocalForwarder {
             .pool_idle_timeout(Duration::from_secs(30))
             .build(connector.clone());
 
-        let replay_client = Client::builder(TokioExecutor::new())
+        let simple_client = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(30))
             .build(connector);
 
@@ -64,7 +64,7 @@ impl LocalForwarder {
             quiet,
             custom_headers,
             stream_client,
-            replay_client,
+            simple_client,
         })
     }
 
@@ -72,43 +72,18 @@ impl LocalForwarder {
         format!("http://{}:{}", self.host, self.port)
     }
 
-    /// Streams a multiplexed tunnel request directly to the local dev server,
-    /// streams the response back over the tunnel, and records a bounded preview
-    /// for the local inspector.
-    pub async fn forward_tunnel_request(
+    fn build_upstream_request_parts(
         &self,
-        head: RequestHead,
-        mut req_body_rx: mpsc::Receiver<Bytes>,
-        outbound_tx: mpsc::Sender<Bytes>,
-        hub: Arc<InspectorHub>,
-    ) {
-        let started = Instant::now();
-        let req_id = head.req_id;
-        let record_id = hub.next_record_id();
-
-        let (upstream_tx, upstream_rx) = mpsc::channel::<Result<HyperFrame<Bytes>, Infallible>>(32);
-        let req_preview_task = tokio::spawn(async move {
-            let mut preview = Vec::new();
-            let mut total_bytes = 0usize;
-            while let Some(chunk) = req_body_rx.recv().await {
-                total_bytes += chunk.len();
-                if preview.len() < MAX_PREVIEW_BYTES {
-                    let take = (MAX_PREVIEW_BYTES - preview.len()).min(chunk.len());
-                    preview.extend_from_slice(&chunk[..take]);
-                }
-                if upstream_tx.send(Ok(HyperFrame::data(chunk))).await.is_err() {
-                    break;
-                }
-            }
-            (preview, total_bytes)
-        });
-
-        let uri = format!("http://{}:{}{}", self.host, self.port, head.path_and_query);
-        let method = Method::from_bytes(head.method.as_bytes()).unwrap_or(Method::GET);
+        method_str: &str,
+        path_and_query: &str,
+        headers: &[(String, String)],
+    ) -> http::request::Builder {
+        let uri = format!("http://{}:{}{}", self.host, self.port, path_and_query);
+        let method = Method::from_bytes(method_str.as_bytes()).unwrap_or(Method::GET);
 
         let mut builder = Request::builder().method(method).uri(&uri);
         if let Some(hdrs) = builder.headers_mut() {
-            for (k, v) in &head.headers {
+            for (k, v) in headers {
                 if is_hop_by_hop_header(k) {
                     continue;
                 }
@@ -136,36 +111,102 @@ impl LocalForwarder {
                 }
             }
         }
+        builder
+    }
 
-        let body = StreamBody::new(ReceiverStream::new(upstream_rx));
-        let Ok(http_req) = builder.body(body) else {
-            let _ = send_error_response(&outbound_tx, req_id, 500, "invalid request").await;
-            return;
+    /// Forwards a multiplexed tunnel request to the local dev server.
+    ///
+    /// Fast paths:
+    /// - When `req_body_rx` is `None` (`has_body == false`), skips spawning a body
+    ///   tee task and extra channel allocation completely.
+    /// - When `hub` is `None` (`--no-inspector`), skips all body preview buffering,
+    ///   decompression, and inspector lock contention.
+    pub async fn forward_tunnel_request(
+        &self,
+        head: RequestHead,
+        req_body_rx: Option<mpsc::Receiver<Bytes>>,
+        outbound_tx: mpsc::Sender<Bytes>,
+        hub: Option<Arc<InspectorHub>>,
+    ) {
+        let started = Instant::now();
+        let req_id = head.req_id;
+        let record_id = hub.as_ref().map(|h| h.next_record_id());
+        let capture = hub.is_some();
+
+        let builder =
+            self.build_upstream_request_parts(&head.method, &head.path_and_query, &head.headers);
+
+        let (resp_res, req_preview_task) = match req_body_rx {
+            None => {
+                // Zero-body fast path (GET, HEAD, DELETE, empty POST)
+                let Ok(http_req) = builder.body(Full::new(Bytes::new())) else {
+                    let _ = send_error_response(&outbound_tx, req_id, 500, "invalid request").await;
+                    return;
+                };
+                (self.simple_client.request(http_req).await, None)
+            }
+            Some(mut body_rx) => {
+                let (upstream_tx, upstream_rx) =
+                    mpsc::channel::<Result<HyperFrame<Bytes>, Infallible>>(32);
+                let task = tokio::spawn(async move {
+                    let mut preview = Vec::new();
+                    let mut total_bytes = 0usize;
+                    while let Some(chunk) = body_rx.recv().await {
+                        total_bytes += chunk.len();
+                        if capture && preview.len() < MAX_PREVIEW_BYTES {
+                            let take = (MAX_PREVIEW_BYTES - preview.len()).min(chunk.len());
+                            preview.extend_from_slice(&chunk[..take]);
+                        }
+                        if upstream_tx.send(Ok(HyperFrame::data(chunk))).await.is_err() {
+                            break;
+                        }
+                    }
+                    (preview, total_bytes)
+                });
+
+                let body = StreamBody::new(ReceiverStream::new(upstream_rx));
+                let Ok(http_req) = builder.body(body) else {
+                    let _ = send_error_response(&outbound_tx, req_id, 500, "invalid request").await;
+                    return;
+                };
+                (self.stream_client.request(http_req).await, Some(task))
+            }
         };
 
-        let resp_res = self.stream_client.request(http_req).await;
         let local_latency_us = started.elapsed().as_micros() as u64;
 
         match resp_res {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
-                let resp_headers: Vec<(String, String)> = resp
-                    .headers()
-                    .iter()
-                    .filter(|(n, _)| !is_hop_by_hop_header(n.as_str()))
-                    .filter_map(|(n, v)| {
-                        v.to_str()
-                            .ok()
-                            .map(|val| (n.as_str().to_string(), val.to_string()))
-                    })
-                    .collect();
+                let mut resp_headers = Vec::with_capacity(resp.headers().len());
+                for (n, v) in resp.headers() {
+                    if !is_hop_by_hop_header(n.as_str())
+                        && let Ok(val) = v.to_str()
+                    {
+                        resp_headers.push((n.as_str().to_string(), val.to_string()));
+                    }
+                }
 
                 let resp_head = Frame::ResponseHead(ResponseHead {
                     req_id,
                     status,
-                    headers: resp_headers.clone(),
+                    headers: if capture {
+                        resp_headers.clone()
+                    } else {
+                        resp_headers
+                    },
                     local_latency_us,
                 });
+                let saved_resp_headers = if capture {
+                    if let Frame::ResponseHead(ref h) = resp_head {
+                        h.headers.clone()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
                 if let Ok(bytes) = resp_head.encode() {
                     let _ = outbound_tx.send(bytes).await;
                 }
@@ -181,7 +222,7 @@ impl LocalForwarder {
                                 && !data.is_empty()
                             {
                                 resp_bytes += data.len();
-                                if resp_preview.len() < MAX_PREVIEW_BYTES {
+                                if capture && resp_preview.len() < MAX_PREVIEW_BYTES {
                                     let take =
                                         (MAX_PREVIEW_BYTES - resp_preview.len()).min(data.len());
                                     resp_preview.extend_from_slice(&data[..take]);
@@ -205,10 +246,8 @@ impl LocalForwarder {
                     let _ = outbound_tx.send(end).await;
                 }
 
-                let (req_preview, req_bytes) = req_preview_task.await.unwrap_or_default();
-                let total_us = started.elapsed().as_micros() as u64;
-
                 if !self.quiet {
+                    let total_us = started.elapsed().as_micros() as u64;
                     print_access_line(
                         status,
                         &head.method,
@@ -218,41 +257,46 @@ impl LocalForwarder {
                     );
                 }
 
-                let resp_encoding = resp_headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
-                    .map(|(_, v)| v.as_str());
-                let req_encoding = head
-                    .headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
-                    .map(|(_, v)| v.as_str());
+                if let (Some(hub), Some(id)) = (hub, record_id) {
+                    let (req_preview, req_bytes) = match req_preview_task {
+                        Some(t) => t.await.unwrap_or_default(),
+                        None => (Vec::new(), 0),
+                    };
+                    let request_body = {
+                        let req_encoding = head
+                            .headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                            .map(|(_, v)| v.as_str());
+                        format_body_preview_with_encoding(&req_preview, req_bytes, req_encoding)
+                    };
+                    let response_body = {
+                        let resp_encoding = saved_resp_headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                            .map(|(_, v)| v.as_str());
+                        format_body_preview_with_encoding(&resp_preview, resp_bytes, resp_encoding)
+                    };
 
-                hub.push_record(TrafficRecord {
-                    id: record_id,
-                    timestamp_ms: now_millis(),
-                    source: "tunnel".to_string(),
-                    method: head.method,
-                    path_and_query: head.path_and_query,
-                    request_headers: head.headers.clone(),
-                    request_body: format_body_preview_with_encoding(
-                        &req_preview,
-                        req_bytes,
-                        req_encoding,
-                    ),
-                    request_bytes: req_bytes,
-                    status,
-                    response_headers: resp_headers.clone(),
-                    response_body: format_body_preview_with_encoding(
-                        &resp_preview,
-                        resp_bytes,
-                        resp_encoding,
-                    ),
-                    response_bytes: resp_bytes,
-                    local_latency_us,
-                    error: None,
-                })
-                .await;
+                    hub.push_record(TrafficRecord {
+                        id,
+                        timestamp_ms: now_millis(),
+                        source: "tunnel".to_string(),
+                        target: self.target_display(),
+                        method: head.method,
+                        path_and_query: head.path_and_query,
+                        request_headers: head.headers,
+                        request_body,
+                        request_bytes: req_bytes,
+                        status,
+                        response_headers: saved_resp_headers,
+                        response_body,
+                        response_bytes: resp_bytes,
+                        local_latency_us,
+                        error: None,
+                    })
+                    .await;
+                }
             }
             Err(err) => {
                 let err_msg = format!(
@@ -260,7 +304,6 @@ impl LocalForwarder {
                     self.host, self.port
                 );
                 let _ = send_error_response(&outbound_tx, req_id, 502, &err_msg).await;
-                let (req_preview, req_bytes) = req_preview_task.await.unwrap_or_default();
 
                 if !self.quiet {
                     print_access_line(
@@ -272,39 +315,45 @@ impl LocalForwarder {
                     );
                 }
 
-                hub.push_record(TrafficRecord {
-                    id: record_id,
-                    timestamp_ms: now_millis(),
-                    source: "tunnel".to_string(),
-                    method: head.method,
-                    path_and_query: head.path_and_query,
-                    request_headers: head.headers,
-                    request_body: format_body_preview(&req_preview, req_bytes),
-                    request_bytes: req_bytes,
-                    status: 502,
-                    response_headers: vec![],
-                    response_body: err_msg.clone(),
-                    response_bytes: err_msg.len(),
-                    local_latency_us,
-                    error: Some(err_msg),
-                })
-                .await;
+                if let (Some(hub), Some(id)) = (hub, record_id) {
+                    let (req_preview, req_bytes) = match req_preview_task {
+                        Some(t) => t.await.unwrap_or_default(),
+                        None => (Vec::new(), 0),
+                    };
+                    hub.push_record(TrafficRecord {
+                        id,
+                        timestamp_ms: now_millis(),
+                        source: "tunnel".to_string(),
+                        target: self.target_display(),
+                        method: head.method,
+                        path_and_query: head.path_and_query,
+                        request_headers: head.headers,
+                        request_body: format_body_preview(&req_preview, req_bytes),
+                        request_bytes: req_bytes,
+                        status: 502,
+                        response_headers: vec![],
+                        response_body: err_msg.clone(),
+                        response_bytes: err_msg.len(),
+                        local_latency_us,
+                        error: Some(err_msg),
+                    })
+                    .await;
+                }
             }
         }
     }
 
-    /// Bridges a tunneled WebSocket upgrade directly to the local dev server
-    /// (supports Vite HMR, Next.js Fast Refresh, Socket.IO, etc.).
+    /// Bridges a tunneled WebSocket upgrade directly to the local dev server.
     pub async fn forward_ws_connection(
         &self,
         open: WsOpen,
         mut from_tunnel_rx: mpsc::Receiver<(bool, Bytes)>,
         outbound_tx: mpsc::Sender<Bytes>,
-        hub: Arc<InspectorHub>,
+        hub: Option<Arc<InspectorHub>>,
     ) {
         let started = Instant::now();
         let req_id = open.req_id;
-        let record_id = hub.next_record_id();
+        let record_id = hub.as_ref().map(|h| h.next_record_id());
         let ws_uri = format!("ws://{}:{}{}", self.host, self.port, open.path_and_query);
 
         let mut req = match ws_uri.into_client_request() {
@@ -315,12 +364,11 @@ impl LocalForwarder {
             }
         };
 
-        // Forward safe client headers (cookies, subprotocols, auth, origin)
         for (k, v) in &open.headers {
             let lower = k.to_ascii_lowercase();
             if is_hop_by_hop_header(&lower)
                 || lower == "host"
-                || lower.starts_with("sec-websocket-") && lower != "sec-websocket-protocol"
+                || (lower.starts_with("sec-websocket-") && lower != "sec-websocket-protocol")
             {
                 continue;
             }
@@ -332,7 +380,7 @@ impl LocalForwarder {
             }
         }
 
-        let ws_conn = connect_async(req).await;
+        let ws_conn = connect_async_with_config(req, None, true).await;
         let local_latency_us = started.elapsed().as_micros() as u64;
 
         match ws_conn {
@@ -354,23 +402,26 @@ impl LocalForwarder {
                     );
                 }
 
-                hub.push_record(TrafficRecord {
-                    id: record_id,
-                    timestamp_ms: now_millis(),
-                    source: "websocket".to_string(),
-                    method: "WS".to_string(),
-                    path_and_query: open.path_and_query,
-                    request_headers: open.headers,
-                    request_body: String::new(),
-                    request_bytes: 0,
-                    status: 101,
-                    response_headers: vec![("upgrade".to_string(), "websocket".to_string())],
-                    response_body: "WebSocket connection established".to_string(),
-                    response_bytes: 0,
-                    local_latency_us,
-                    error: None,
-                })
-                .await;
+                if let (Some(hub), Some(id)) = (hub, record_id) {
+                    hub.push_record(TrafficRecord {
+                        id,
+                        timestamp_ms: now_millis(),
+                        source: "websocket".to_string(),
+                        target: self.target_display(),
+                        method: "WS".to_string(),
+                        path_and_query: open.path_and_query,
+                        request_headers: open.headers,
+                        request_body: String::new(),
+                        request_bytes: 0,
+                        status: 101,
+                        response_headers: vec![("upgrade".to_string(), "websocket".to_string())],
+                        response_body: "WebSocket connection established".to_string(),
+                        response_bytes: 0,
+                        local_latency_us,
+                        error: None,
+                    })
+                    .await;
+                }
 
                 let (mut local_tx, mut local_rx) = local_ws.split();
 
@@ -441,23 +492,26 @@ impl LocalForwarder {
                     );
                 }
 
-                hub.push_record(TrafficRecord {
-                    id: record_id,
-                    timestamp_ms: now_millis(),
-                    source: "websocket".to_string(),
-                    method: "WS".to_string(),
-                    path_and_query: open.path_and_query,
-                    request_headers: open.headers,
-                    request_body: String::new(),
-                    request_bytes: 0,
-                    status: 502,
-                    response_headers: vec![],
-                    response_body: msg.clone(),
-                    response_bytes: msg.len(),
-                    local_latency_us,
-                    error: Some(msg),
-                })
-                .await;
+                if let (Some(hub), Some(id)) = (hub, record_id) {
+                    hub.push_record(TrafficRecord {
+                        id,
+                        timestamp_ms: now_millis(),
+                        source: "websocket".to_string(),
+                        target: self.target_display(),
+                        method: "WS".to_string(),
+                        path_and_query: open.path_and_query,
+                        request_headers: open.headers,
+                        request_body: String::new(),
+                        request_bytes: 0,
+                        status: 502,
+                        response_headers: vec![],
+                        response_body: msg.clone(),
+                        response_bytes: msg.len(),
+                        local_latency_us,
+                        error: Some(msg),
+                    })
+                    .await;
+                }
             }
         }
     }
@@ -512,6 +566,7 @@ impl LocalForwarder {
                     id: record_id,
                     timestamp_ms: now_millis(),
                     source: "replay".to_string(),
+                    target: self.target_display(),
                     method: method_str,
                     path_and_query: normalized_path,
                     request_headers: headers,
@@ -527,7 +582,7 @@ impl LocalForwarder {
             }
         };
 
-        let resp_res = self.replay_client.request(http_req).await;
+        let resp_res = self.simple_client.request(http_req).await;
         let local_latency_us = started.elapsed().as_micros() as u64;
 
         match resp_res {
@@ -551,9 +606,14 @@ impl LocalForwarder {
                     .map(|c| c.to_bytes())
                     .unwrap_or_default();
                 let resp_bytes = body_bytes.len();
-                let resp_preview = format_body_preview(
+                let resp_encoding = response_headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                    .map(|(_, v)| v.as_str());
+                let resp_preview = format_body_preview_with_encoding(
                     &body_bytes[..body_bytes.len().min(MAX_PREVIEW_BYTES)],
                     resp_bytes,
+                    resp_encoding,
                 );
 
                 if !self.quiet {
@@ -570,6 +630,7 @@ impl LocalForwarder {
                     id: record_id,
                     timestamp_ms: now_millis(),
                     source: "replay".to_string(),
+                    target: self.target_display(),
                     method: method_str,
                     path_and_query: normalized_path,
                     request_headers: headers,
@@ -589,6 +650,7 @@ impl LocalForwarder {
                     id: record_id,
                     timestamp_ms: now_millis(),
                     source: "replay".to_string(),
+                    target: self.target_display(),
                     method: method_str,
                     path_and_query: normalized_path,
                     request_headers: headers,

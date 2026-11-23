@@ -141,7 +141,65 @@ async fn connect_agent(
         while let Some(Ok(TungMsg::Binary(raw))) = ws_rx.next().await {
             match Frame::decode(raw).unwrap() {
                 Frame::RequestHead(head) => {
-                    pending_http.insert(head.req_id, (head, Vec::new()));
+                    let req_id = head.req_id;
+                    let has_body = head.has_body;
+                    pending_http.insert(req_id, (head, Vec::new()));
+                    if !has_body && let Some((_, (head, body))) = pending_http.remove(&req_id) {
+                        let client = client.clone();
+                        let out_tx = out_tx.clone();
+                        tokio::spawn(async move {
+                            let uri = format!("http://{upstream_addr}{}", head.path_and_query);
+                            let mut builder =
+                                Request::builder().method(head.method.as_str()).uri(uri);
+                            for (k, v) in head.headers {
+                                if !k.eq_ignore_ascii_case("host") {
+                                    builder = builder.header(k, v);
+                                }
+                            }
+                            let req = builder.body(Full::new(Bytes::from(body))).unwrap();
+                            let resp = client.request(req).await.unwrap();
+                            let status = resp.status().as_u16();
+                            let resp_headers: Vec<(String, String)> = resp
+                                .headers()
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    v.to_str()
+                                        .ok()
+                                        .map(|val| (k.as_str().to_string(), val.to_string()))
+                                })
+                                .collect();
+                            let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+
+                            out_tx
+                                .send(
+                                    Frame::ResponseHead(ResponseHead {
+                                        req_id,
+                                        status,
+                                        headers: resp_headers,
+                                        local_latency_us: 100,
+                                    })
+                                    .encode()
+                                    .unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                            out_tx
+                                .send(
+                                    Frame::ResponseBody {
+                                        req_id,
+                                        chunk: resp_bytes,
+                                    }
+                                    .encode()
+                                    .unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                            out_tx
+                                .send(Frame::ResponseEnd { req_id }.encode().unwrap())
+                                .await
+                                .unwrap();
+                        });
+                    }
                 }
                 Frame::RequestBody { req_id, chunk } => {
                     if let Some(mut entry) = pending_http.get_mut(&req_id) {

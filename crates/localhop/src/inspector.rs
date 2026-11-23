@@ -37,6 +37,8 @@ pub struct TrafficRecord {
     pub id: u64,
     pub timestamp_ms: u64,
     pub source: String,
+    #[serde(default)]
+    pub target: String,
     pub method: String,
     pub path_and_query: String,
     pub request_headers: Vec<(String, String)>,
@@ -234,7 +236,7 @@ mod tests {
 
 struct InspectorAppState {
     hub: Arc<InspectorHub>,
-    forwarder: Arc<LocalForwarder>,
+    forwarders: Vec<Arc<LocalForwarder>>,
     bound_port: u16,
 }
 
@@ -252,6 +254,8 @@ struct ReplayRequest {
     headers: Vec<(String, String)>,
     #[serde(default)]
     body: String,
+    #[serde(default)]
+    target: Option<String>,
 }
 
 /// Guards mutating localhost APIs against cross-origin browser CSRF.
@@ -271,7 +275,7 @@ fn is_allowed_local_origin(headers: &HeaderMap, port: u16) -> bool {
 pub async fn start_inspector_server(
     port: u16,
     hub: Arc<InspectorHub>,
-    forwarder: Arc<LocalForwarder>,
+    forwarders: Vec<Arc<LocalForwarder>>,
 ) -> Result<SocketAddr, std::io::Error> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -279,7 +283,7 @@ pub async fn start_inspector_server(
 
     let state = Arc::new(InspectorAppState {
         hub,
-        forwarder,
+        forwarders,
         bound_port: local_addr.port(),
     });
 
@@ -328,8 +332,12 @@ async fn replay_handler(
     }
 
     let body_bytes = Bytes::from(req.body.into_bytes());
-    let record = state
-        .forwarder
+    let forwarder = req
+        .target
+        .as_deref()
+        .and_then(|t| state.forwarders.iter().find(|f| f.target_display() == t))
+        .unwrap_or(&state.forwarders[0]);
+    let record = forwarder
         .replay_request(
             state.hub.next_record_id(),
             req.method,

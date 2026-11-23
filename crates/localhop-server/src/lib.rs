@@ -1,3 +1,4 @@
+use axum::body::HttpBody;
 use axum::{
     Json, Router,
     body::Body,
@@ -414,7 +415,21 @@ async fn handle_tunnel_socket(socket: WebSocket, state: Arc<AppState>, inferred_
 
     let writer_handle = tokio::spawn(async move {
         while let Some(frame_bytes) = outbound_rx.recv().await {
-            if ws_tx.send(Message::Binary(frame_bytes)).await.is_err() {
+            if ws_tx.feed(Message::Binary(frame_bytes)).await.is_err() {
+                break;
+            }
+            // Coalesce immediately queued frames into a single TCP write syscall
+            for _ in 0..31 {
+                match outbound_rx.try_recv() {
+                    Ok(more) => {
+                        if ws_tx.feed(Message::Binary(more)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if ws_tx.flush().await.is_err() {
                 break;
             }
         }
@@ -672,11 +687,9 @@ fn extract_client_ip(req: &Request<Body>) -> Option<IpAddr> {
 }
 
 fn rewrite_location_for_path_prefix(val: &str, path_prefix: &str) -> String {
-    if val.starts_with('/')
-        && !val.starts_with("//")
-        && !val.starts_with(&format!("{path_prefix}/"))
-        && val != path_prefix
-    {
+    let already_prefixed = val == path_prefix
+        || (val.starts_with(path_prefix) && val.as_bytes().get(path_prefix.len()) == Some(&b'/'));
+    if val.starts_with('/') && !val.starts_with("//") && !already_prefixed {
         format!("{path_prefix}{val}")
     } else {
         val.to_string()
@@ -688,15 +701,15 @@ fn collect_forwarded_headers(
     peer_ip: Option<String>,
     tunnel_id: &str,
 ) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = headers
-        .iter()
-        .filter(|(name, _)| !is_hop_by_hop_header(name.as_str()))
-        .filter_map(|(name, val)| {
-            val.to_str()
-                .ok()
-                .map(|v| (name.as_str().to_string(), v.to_string()))
-        })
-        .collect();
+    let mut out: Vec<(String, String)> = Vec::with_capacity(headers.len() + 4);
+    for (name, val) in headers {
+        if is_hop_by_hop_header(name.as_str()) {
+            continue;
+        }
+        if let Ok(v) = val.to_str() {
+            out.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
 
     let has_proto = headers.contains_key("x-forwarded-proto");
     let has_host = headers.contains_key("x-forwarded-host");
@@ -807,11 +820,13 @@ async fn proxy_to_tunnel(
         },
     );
 
+    let has_body = !body.is_end_stream();
     let head_frame = Frame::RequestHead(RequestHead {
         req_id,
         method: parts.method.as_str().to_string(),
         path_and_query,
         headers,
+        has_body,
     });
     let Ok(encoded_head) = head_frame.encode() else {
         session.pending_http.remove(&req_id);
@@ -826,38 +841,41 @@ async fn proxy_to_tunnel(
         return (StatusCode::BAD_GATEWAY, "tunnel disconnected").into_response();
     }
 
-    let outbound_tx = session.outbound_tx.clone();
-    let max_body = state.config.max_body_bytes;
-    tokio::spawn(async move {
-        let mut streamed: u64 = 0;
-        while let Some(frame_res) = body.frame().await {
-            match frame_res {
-                Ok(frame) => {
-                    if let Ok(data) = frame.into_data()
-                        && !data.is_empty()
-                    {
-                        streamed = streamed.saturating_add(data.len() as u64);
-                        if streamed > max_body {
-                            break;
-                        }
-                        if let Ok(bytes) = (Frame::RequestBody {
-                            req_id,
-                            chunk: data,
-                        })
-                        .encode()
-                            && outbound_tx.send(bytes).await.is_err()
+    // Fast path: skip spawning a body-streaming task and RequestEnd frame when body is empty
+    if has_body {
+        let outbound_tx = session.outbound_tx.clone();
+        let max_body = state.config.max_body_bytes;
+        tokio::spawn(async move {
+            let mut streamed: u64 = 0;
+            while let Some(frame_res) = body.frame().await {
+                match frame_res {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
                         {
-                            return;
+                            streamed = streamed.saturating_add(data.len() as u64);
+                            if streamed > max_body {
+                                break;
+                            }
+                            if let Ok(bytes) = (Frame::RequestBody {
+                                req_id,
+                                chunk: data,
+                            })
+                            .encode()
+                                && outbound_tx.send(bytes).await.is_err()
+                            {
+                                return;
+                            }
                         }
                     }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
-        if let Ok(end) = (Frame::RequestEnd { req_id }).encode() {
-            let _ = outbound_tx.send(end).await;
-        }
-    });
+            if let Ok(end) = (Frame::RequestEnd { req_id }).encode() {
+                let _ = outbound_tx.send(end).await;
+            }
+        });
+    }
 
     let timeout = Duration::from_secs(state.config.timeout_secs);
     let resp_head = match tokio::time::timeout(timeout, head_rx).await {

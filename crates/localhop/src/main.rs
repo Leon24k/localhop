@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::mpsc, task::AbortHandle};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 
 use crate::{
     config::{TunnelSpec, load_config, parse_header_arg},
@@ -71,7 +71,7 @@ struct Cli {
     #[arg(long, default_value_t = 4040)]
     inspector_port: u16,
 
-    /// Disable the local web inspector UI
+    /// Disable the local web inspector UI (zero-overhead headless mode)
     #[arg(long, default_value_t = false)]
     no_inspector: bool,
 }
@@ -166,24 +166,25 @@ async fn main() {
     }
 
     let ws_url = normalize_ws_url(&server_raw);
-    let primary_forwarder = prepared[0].1.clone();
     let target_summary = if prepared.len() == 1 {
-        primary_forwarder.target_display()
+        prepared[0].1.target_display()
     } else {
         format!("{} local targets", prepared.len())
     };
-    let hub = InspectorHub::new(target_summary.clone(), ws_url.clone());
 
-    let inspector_url = if no_inspector {
-        None
+    let (hub, inspector_url) = if no_inspector {
+        (None, None)
     } else {
-        match start_inspector_server(inspector_port, hub.clone(), primary_forwarder).await {
-            Ok(addr) => Some(format!("http://{addr}")),
+        let hub = InspectorHub::new(target_summary, ws_url.clone());
+        let all_forwarders: Vec<Arc<LocalForwarder>> =
+            prepared.iter().map(|(_, f)| f.clone()).collect();
+        match start_inspector_server(inspector_port, hub.clone(), all_forwarders).await {
+            Ok(addr) => (Some(hub), Some(format!("http://{addr}"))),
             Err(e) => {
                 eprintln!(
                     "\x1b[33mwarn:\x1b[0m could not bind inspector on port {inspector_port}: {e}"
                 );
-                None
+                (None, None)
             }
         }
     };
@@ -228,7 +229,7 @@ async fn run_reconnect_loop(
     token: Option<String>,
     basic_auth: Option<String>,
     forwarder: Arc<LocalForwarder>,
-    hub: Arc<InspectorHub>,
+    hub: Option<Arc<InspectorHub>>,
 ) {
     let base_backoff = Duration::from_millis(400);
     let mut backoff = base_backoff;
@@ -243,7 +244,9 @@ async fn run_reconnect_loop(
             hub.clone(),
         )
         .await;
-        hub.set_connected(false, None).await;
+        if let Some(ref h) = hub {
+            h.set_connected(false, None).await;
+        }
         match outcome {
             SessionEnd::Fatal(err) => {
                 eprintln!("  \x1b[31m! Fatal error:\x1b[0m {err}");
@@ -277,9 +280,10 @@ async fn run_session(
     token: Option<String>,
     basic_auth: Option<String>,
     forwarder: Arc<LocalForwarder>,
-    hub: Arc<InspectorHub>,
+    hub: Option<Arc<InspectorHub>>,
 ) -> SessionEnd {
-    let (ws_stream, _) = match connect_async(ws_url).await {
+    // disable_nagle = true -> sets TCP_NODELAY on the tunnel socket to eliminate Nagle stalls
+    let (ws_stream, _) = match connect_async_with_config(ws_url, None, true).await {
         Ok(ok) => ok,
         Err(e) => {
             return SessionEnd::Transient {
@@ -363,8 +367,10 @@ async fn run_session(
         }
     };
 
-    hub.set_connected(true, Some(welcome.public_url.clone()))
-        .await;
+    if let Some(ref h) = hub {
+        h.set_connected(true, Some(welcome.public_url.clone()))
+            .await;
+    }
 
     println!(
         "  \x1b[1;32m● LIVE\x1b[0m  {}  ->  \x1b[1;32m{}\x1b[0m",
@@ -378,9 +384,23 @@ async fn run_session(
     let in_flight_http_tasks: Arc<DashMap<u64, AbortHandle>> = Arc::new(DashMap::new());
     let in_flight_ws: Arc<DashMap<u64, mpsc::Sender<(bool, Bytes)>>> = Arc::new(DashMap::new());
 
+    // Batched WS writer: coalesce ResponseHead + ResponseBody + ResponseEnd into 1 syscall
     let writer = tokio::spawn(async move {
         while let Some(frame_bytes) = outbound_rx.recv().await {
-            if ws_tx.send(Message::Binary(frame_bytes)).await.is_err() {
+            if ws_tx.feed(Message::Binary(frame_bytes)).await.is_err() {
+                break;
+            }
+            for _ in 0..31 {
+                match outbound_rx.try_recv() {
+                    Ok(more) => {
+                        if ws_tx.feed(Message::Binary(more)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if ws_tx.flush().await.is_err() {
                 break;
             }
         }
@@ -405,18 +425,26 @@ async fn run_session(
             Ok(Message::Binary(raw)) => match Frame::decode(raw) {
                 Ok(Frame::RequestHead(head)) => {
                     let req_id = head.req_id;
-                    let (body_tx, body_rx) = mpsc::channel::<Bytes>(64);
-                    in_flight_http.insert(req_id, body_tx);
+                    let body_rx = if head.has_body {
+                        let (body_tx, body_rx) = mpsc::channel::<Bytes>(64);
+                        in_flight_http.insert(req_id, body_tx);
+                        Some(body_rx)
+                    } else {
+                        None
+                    };
 
                     let fwd = forwarder.clone();
                     let out = outbound_tx.clone();
                     let hub_clone = hub.clone();
                     let body_map = in_flight_http.clone();
                     let task_map = in_flight_http_tasks.clone();
+                    let has_body = head.has_body;
                     let handle = tokio::spawn(async move {
                         fwd.forward_tunnel_request(head, body_rx, out, hub_clone)
                             .await;
-                        body_map.remove(&req_id);
+                        if has_body {
+                            body_map.remove(&req_id);
+                        }
                         task_map.remove(&req_id);
                     });
                     in_flight_http_tasks.insert(req_id, handle.abort_handle());
@@ -465,9 +493,11 @@ async fn run_session(
                     in_flight_ws.remove(&req_id);
                 }
                 Ok(Frame::Pong { ts_us }) => {
-                    let now = now_micros();
-                    if now >= ts_us {
-                        hub.set_rtt_us(now - ts_us).await;
+                    if let Some(ref h) = hub {
+                        let now = now_micros();
+                        if now >= ts_us {
+                            h.set_rtt_us(now - ts_us).await;
+                        }
                     }
                 }
                 Ok(Frame::Error(e)) => {

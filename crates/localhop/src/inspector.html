@@ -345,7 +345,7 @@ $('exportBtn').onclick = () => {
 $('replayBtn').onclick = () => {
   const r = selectedRecord();
   if (!r) return;
-  sendReplay({ method: r.method, path_and_query: r.path_and_query, headers: r.request_headers, body: r.request_body });
+  sendReplay({ method: r.method, path_and_query: r.path_and_query, headers: r.request_headers, body: r.request_body, target: r.target || undefined });
 };
 
 $('editReplayBtn').onclick = () => {

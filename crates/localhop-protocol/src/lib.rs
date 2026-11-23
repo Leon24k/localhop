@@ -46,12 +46,19 @@ pub struct ProtocolErrorMsg {
     pub message: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestHead {
     pub req_id: u64,
     pub method: String,
     pub path_and_query: String,
     pub headers: Vec<(String, String)>,
+    /// When `false`, the request has no body and no `RequestEnd` frame will follow.
+    #[serde(default = "default_true")]
+    pub has_body: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,19 +294,17 @@ fn decode_body(payload: Bytes) -> Result<(u64, Bytes), CodecError> {
     Ok((req_id, chunk))
 }
 
-/// Headers that must not be blindly forwarded across HTTP hops.
+/// Headers that must not be blindly forwarded across HTTP hops (zero heap allocations).
+#[inline]
 pub fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-authenticate")
+        || name.eq_ignore_ascii_case("proxy-authorization")
+        || name.eq_ignore_ascii_case("te")
+        || name.eq_ignore_ascii_case("trailers")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
 }
 
 /// Validates a custom tunnel ID (lowercase alphanumeric + hyphens, 3..=32 chars).
@@ -388,6 +393,7 @@ mod tests {
             method: "POST".into(),
             path_and_query: "/webhooks/stripe?v=1".into(),
             headers: vec![("content-type".into(), "application/json".into())],
+            has_body: true,
         };
         let encoded = Frame::RequestHead(head.clone()).encode().unwrap();
         match Frame::decode(encoded).unwrap() {
@@ -396,6 +402,7 @@ mod tests {
                 assert_eq!(decoded.method, head.method);
                 assert_eq!(decoded.path_and_query, head.path_and_query);
                 assert_eq!(decoded.headers, head.headers);
+                assert!(decoded.has_body);
             }
             other => panic!("unexpected frame: {other:?}"),
         }

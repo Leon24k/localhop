@@ -15,7 +15,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Automated release pipeline:** GitHub Actions upgrades to Node 24-native actions, generates a `localhop.rb` Homebrew formula on every tag release, and supports automatic `crates.io` + `npm` publishing via repository secrets (`CARGO_REGISTRY_TOKEN`, `NPM_TOKEN`), plus `./scripts/release.sh`.
 - **1-Click Deploy to Render** buttons in README and live website, plus real Inspector UI screenshot in README.
 
+### Performance
+- **Zero-body request fast path (`has_body`):** Skips body-streaming task spawning, extra `mpsc` channels, and `RequestEnd` frames for empty-body HTTP requests (`GET`, `HEAD`, `DELETE`).
+- **Batched WebSocket writer (`feed` + `try_recv` + `flush`):** Coalesces up to 32 queued tunnel frames (such as `ResponseHead` + `ResponseBody` + `ResponseEnd`) into a single TCP write syscall.
+- **`TCP_NODELAY` on tunnel WebSockets:** Enabled `disable_nagle = true` in `tokio-tungstenite` client connections to eliminate Nagle/Delayed-ACK latency stalls.
+- **Zero-overhead headless mode (`--no-inspector`):** Completely bypasses body preview copying, decompression, and inspector `RwLock` contention when disabled.
+- **Zero-allocation header filtering:** Replaced `to_ascii_lowercase()` heap allocations in `is_hop_by_hop_header` with `eq_ignore_ascii_case`.
+
 ### Fixed
+- Fixed `.github/workflows/release.yml` job-level `secrets.*` validation error by moving token checks into step-level environment guards.
+- Fixed multi-tunnel replay routing in the Live Inspector so replayed requests target the original tunnel port.
 - Normalized `npm/localhop/package.json` `repository.url` to `git+https://github.com/Leon24k/localhop.git`.
 
 ## [0.1.0] - 2026-11-22
